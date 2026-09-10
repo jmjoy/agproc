@@ -1,4 +1,4 @@
-//! Readiness probes: a minimal HTTP/1.1 GET and a TCP connect.
+//! Probes: a minimal HTTP/1.1 GET and a TCP connect.
 //!
 //! Only the status line of the HTTP response is needed, so this deliberately
 //! avoids pulling in an HTTP client (and TLS): agproc probes local dev

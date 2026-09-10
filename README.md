@@ -5,11 +5,11 @@
 > A **dev-time process manager** for AI agents and humans alike (Linux only, for now)
 
 Declare your project's long-running services (backend / frontend / workers) in `agproc.toml`;
-agproc takes care of **build → run → readiness probe** and keeps every process's state and logs
+agproc takes care of **build → run → probe** and keeps every process's state and logs
 under `.agproc/`, so calling it repeatedly is safe for both humans and agents.
 
 ```bash
-agproc start              # start every service in parallel, wait for readiness
+agproc start              # start every service in parallel, wait for the probe
 agproc ps                 # what is running: pid, uptime, why it failed
 agproc restart backend    # the standard move after editing backend code
 agproc logs -f            # live logs, prefixed per service
@@ -22,9 +22,9 @@ agproc stop               # stop everything
 |---|---|
 | An agent edits code constantly, retriggering builds and restarts — sometimes ending up with two dev servers | `start` is **idempotent**: when the service is already running it prints `ALREADY RUNNING` and exits 0 without building or restarting anything. Pair it with a **non-watching** `run-cmd` (e.g. `vite preview`) and restart explicitly after edits, so every step is predictable |
 | Rust projects must compile before they run, and failures are scattered around | `build-cmd` and `run-cmd` are separate; a failed build gets its own marker and **exit code 4**, so an agent needs no text parsing |
-| "The process is still alive" is a poor readiness signal | Built-in `http-get` / `tcp-connect` readiness probes; failure is only declared after `failure-threshold` retries (**exit code 6**) |
-| A leftover process holds the port, so the probe "passes" against someone else's process | Port preflight warning + **ownership verification** at the moment readiness is reported + child-exit-first ordering. It never reports a false success |
-| Piped output gets block buffered and the pre-readiness logs never arrive | One pty per stream keeps the child **line buffered**, so output shows up as it happens |
+| "The process is still alive" is a weak signal | Built-in `http-get` / `tcp-connect` probes; failure is only declared after `failure-threshold` retries (**exit code 6**) |
+| A leftover process holds the port, so the probe "passes" against someone else's process | Port preflight warning + **ownership verification** at the moment the probe passes + child-exit-first ordering. It never reports a false success |
+| Piped output gets block buffered and early log lines never arrive | One pty per stream keeps the child **line buffered**, so output shows up as it happens |
 
 ## Install
 
@@ -42,15 +42,15 @@ cargo build --release && install -m755 target/release/agproc ~/.local/bin/
 ```bash
 cd your-project
 agproc init            # write an agproc.toml template (detects Cargo.toml / package.json)
-$EDITOR agproc.toml    # fill in build-cmd / run-cmd / readiness-probe
-agproc start           # start everything and wait for readiness
+$EDITOR agproc.toml    # fill in build-cmd / run-cmd / probe
+agproc start           # start everything and wait for the probe
 ```
 
 ## Commands
 
 ```
-agproc start   [service...] [--timeout-seconds N]   # build + run + wait for readiness; no-op when already running
-agproc restart [service...] [--timeout-seconds N]   # stop first, then build + run + wait for readiness
+agproc start   [service...] [--timeout-seconds N]   # build + run + wait for the probe; no-op when already running
+agproc restart [service...] [--timeout-seconds N]   # stop first, then build + run + wait for the probe
 agproc stop    [service...]                         # stop a running service or cancel a build in progress
 agproc ps      [service...] [--json]                # what is running
 agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr] [--all]
@@ -85,7 +85,7 @@ build-timeout-seconds = 0         # optional; 0 = no limit
 run-cmd = "./target/debug/api"    # required; string = <shell> -c, array = exec directly
 stop-timeout-seconds = 10         # optional, overrides [settings]
 
-readiness-probe = {               # optional; without it "still alive" means ready
+probe = {                         # optional; without it "still alive" means ready
   http-get = { scheme = "http", host = "127.0.0.1", port = 3000, path = "/healthz" },
   initial-delay-seconds = 1,      # wait before the first attempt
   period-seconds = 1,             # interval between attempts
@@ -97,9 +97,9 @@ readiness-probe = {               # optional; without it "still alive" means rea
 A plain TCP connectivity probe works just as well:
 
 ```toml
-readiness-probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
-                    initial-delay-seconds = 1, period-seconds = 1,
-                    timeout-seconds = 2, failure-threshold = 3 }
+probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
+          initial-delay-seconds = 1, period-seconds = 1,
+          timeout-seconds = 2, failure-threshold = 3 }
 ```
 
 Rules:
@@ -119,8 +119,8 @@ Everything agproc says itself looks like `===== LIKE THIS =====`:
 ===== BUILD SUCCEED =====            # on failure: ===== BUILD FAILED (exit code 101) =====
 ===== RUNNING =====
 ===== PROBE ATTEMPT 2/3 FAILED: connection refused (http://127.0.0.1:3000/healthz) =====
-===== READINESS PROBE PASSED (attempt 2) =====
-===== READINESS PROBE FAILED: 3 consecutive failures, last: ... =====
+===== PROBE PASSED (attempt 2) =====
+===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code 1) =====
 ===== SERVICE EXITED (exit code 0, ready for 12s) =====
 ===== STOPPED ===== / ===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
@@ -146,15 +146,15 @@ prefixes are `backend | ` and `backend stderr | `.
 | 2 | usage error |
 | 3 | configuration error (missing or invalid `agproc.toml`, unknown service name) |
 | 4 | build failed (non-zero exit or timeout) |
-| 5 | run failed (the process exited before readiness) |
-| 6 | readiness probe failed |
+| 5 | run failed (the process exited before the probe passed) |
+| 6 | probe failed |
 | 7 | another start/restart is already in progress for this service |
 | 8 | this start was superseded (e.g. interrupted by `stop`) |
 
 ## States (`agproc ps`)
 
 `building`, `starting` (running, not yet ready), `running`, `build failed`, `run failed`,
-`running failed` (exited after being ready), `readiness probe failed`, `stopped`, and
+`running failed` (exited after being ready), `probe failed`, `stopped`, and
 `stale` (the runner was `kill -9`ed; the next `start` reaps the leftover process group and rebuilds).
 
 `agproc ps --json` emits a stable shape (`phase` / `pid` / `runner_pid` / `child_pid` /

@@ -1,4 +1,4 @@
-//! `agproc start` / `agproc restart` — build, run and wait for readiness.
+//! `agproc start` / `agproc restart` — build, run and wait for the probe.
 //!
 //! The CLI is deliberately thin: it takes the orchestration lock, spawns a
 //! detached runner for the service, forwards the runner's log output, and waits
@@ -314,7 +314,7 @@ fn start_one(
             relay.flush();
             return Err(Failed::new(
                 exit::GENERIC,
-                "timed out waiting for readiness (the runner keeps working; use `agproc ps`)",
+                "timed out waiting for the probe (the runner keeps working; use `agproc ps`)",
             ));
         }
 
@@ -341,10 +341,10 @@ fn settle(state: &State) -> Result<Started, Failed> {
         Phase::RunFailed => Err(Failed::new(exit::RUN_FAILED, "running failed")),
         Phase::Exited => Err(Failed::new(
             exit::RUN_FAILED,
-            "running failed (exited right after readiness)",
+            "running failed (exited right after the probe passed)",
         )),
-        Phase::ReadinessProbeFailed => {
-            Err(Failed::new(exit::PROBE_FAILED, "readiness probe failed"))
+        Phase::ProbeFailed => {
+            Err(Failed::new(exit::PROBE_FAILED, "probe failed"))
         }
         Phase::Stopped => Err(Failed::new(
             exit::SUPERSEDED,

@@ -20,18 +20,18 @@ pub const SCHEMA: u32 = 1;
 pub enum Phase {
     /// Running `build-cmd`.
     Building,
-    /// `run-cmd` is up, the readiness probe has not settled yet.
+    /// `run-cmd` is up, the probe has not settled yet.
     Starting,
-    /// Readiness passed, the service is up.
+    /// The probe passed, the service is up.
     Running,
     /// `build-cmd` exited non-zero (or timed out).
     BuildFailed,
-    /// `run-cmd` exited before readiness.
+    /// `run-cmd` exited before the probe passed.
     RunFailed,
     /// `run-cmd` exited after having been ready.
     Exited,
-    /// The readiness probe hit its failure threshold; the child was stopped.
-    ReadinessProbeFailed,
+    /// The probe hit its failure threshold; the child was stopped.
+    ProbeFailed,
     /// Stopped by `agproc stop` (or while building).
     Stopped,
     /// The runner disappeared without recording an outcome (`kill -9`).
@@ -48,7 +48,7 @@ impl Phase {
             Phase::BuildFailed => "build-failed",
             Phase::RunFailed => "run-failed",
             Phase::Exited => "exited",
-            Phase::ReadinessProbeFailed => "readiness-probe-failed",
+            Phase::ProbeFailed => "probe-failed",
             Phase::Stopped => "stopped",
             Phase::Stale => "stale",
         }
@@ -63,7 +63,7 @@ impl Phase {
             Phase::BuildFailed => "build failed",
             Phase::RunFailed => "run failed",
             Phase::Exited => "running failed",
-            Phase::ReadinessProbeFailed => "readiness probe failed",
+            Phase::ProbeFailed => "probe failed",
             Phase::Stopped => "stopped",
             Phase::Stale => "stale",
         }
@@ -77,7 +77,7 @@ impl Phase {
                 | Phase::BuildFailed
                 | Phase::RunFailed
                 | Phase::Exited
-                | Phase::ReadinessProbeFailed
+                | Phase::ProbeFailed
                 | Phase::Stopped
                 | Phase::Stale
         )
@@ -89,7 +89,7 @@ impl Phase {
             Phase::Running => crate::exit::OK,
             Phase::BuildFailed => crate::exit::BUILD_FAILED,
             Phase::RunFailed | Phase::Exited | Phase::Stale => crate::exit::RUN_FAILED,
-            Phase::ReadinessProbeFailed => crate::exit::PROBE_FAILED,
+            Phase::ProbeFailed => crate::exit::PROBE_FAILED,
             Phase::Stopped => crate::exit::SUPERSEDED,
             Phase::Building | Phase::Starting => crate::exit::GENERIC,
         }
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(Phase::BuildFailed.start_exit_code(), 4);
         assert_eq!(Phase::RunFailed.start_exit_code(), 5);
         assert_eq!(Phase::Exited.start_exit_code(), 5);
-        assert_eq!(Phase::ReadinessProbeFailed.start_exit_code(), 6);
+        assert_eq!(Phase::ProbeFailed.start_exit_code(), 6);
         assert_eq!(Phase::Stopped.start_exit_code(), 8);
     }
 }

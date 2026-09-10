@@ -61,8 +61,8 @@ fn render(root: &Path) -> String {
         "# agproc.toml — dev-time process manager for AI agents and humans.\n\
          # Agents: run `agproc skills` for the full, project-aware guide.\n\
          #\n\
-         # start   : build (if needed) + run + wait for readiness; a no-op when already running\n\
-         # restart : stop, then build + run + wait for readiness\n\
+         # start   : build (if needed) + run + wait for the probe; a no-op when already running\n\
+         # restart : stop, then build + run + wait for the probe\n\
          # stop/ps/logs: manage and inspect what agproc started\n\n\
          [settings]\n\
          # shell = \"sh\"                      # shell for the string form of build-cmd / run-cmd\n\
@@ -80,7 +80,7 @@ fn render(root: &Path) -> String {
              name = \"backend\"\n\
              build-cmd = \"cargo build\"\n\
              run-cmd = \"./target/debug/{name}\"\n\
-             readiness-probe = {{\n\
+             probe = {{\n\
              \x20 http-get = {{ scheme = \"http\", host = \"127.0.0.1\", port = 3000, path = \"/healthz\" }},\n\
              \x20 initial-delay-seconds = 1,\n\
              \x20 period-seconds = 1,\n\
@@ -93,7 +93,7 @@ fn render(root: &Path) -> String {
              # name = \"backend\"\n\
              # build-cmd = \"cargo build\"\n\
              # run-cmd = \"./target/debug/my-backend\"\n\
-             # readiness-probe = { http-get = { port = 3000, path = \"/healthz\" },\n\
+             # probe = { http-get = { port = 3000, path = \"/healthz\" },\n\
              #                     initial-delay-seconds = 1, period-seconds = 1,\n\
              #                     timeout-seconds = 2, failure-threshold = 3 }\n\n",
         ),
@@ -122,7 +122,7 @@ fn render(root: &Path) -> String {
         );
     }
     frontend.push_str(
-        "# readiness-probe = { tcp-connect = { host = \"127.0.0.1\", port = 5173 },\n\
+        "# probe = { tcp-connect = { host = \"127.0.0.1\", port = 5173 },\n\
          #                     initial-delay-seconds = 1, period-seconds = 1,\n\
          #                     timeout-seconds = 2, failure-threshold = 3 }\n",
     );

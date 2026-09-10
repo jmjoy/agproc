@@ -142,7 +142,7 @@ fn row_for(
             "building for {}",
             format_duration_ms(state.uptime_ms())
         ),
-        Phase::Starting => format!("waiting for readiness ({})", target.describe()),
+        Phase::Starting => format!("probing ({})", target.describe()),
         Phase::Running => {
             let ready_ago = state
                 .ready_at
@@ -155,14 +155,14 @@ fn row_for(
             None => "build-cmd timed out".to_string(),
         },
         Phase::RunFailed => match state.run_exit_code {
-            Some(code) => format!("run-cmd exited with {code} before readiness"),
-            None => "run-cmd exited before readiness".to_string(),
+            Some(code) => format!("run-cmd exited with {code} before the probe passed"),
+            None => "run-cmd exited before the probe passed".to_string(),
         },
         Phase::Exited => match state.run_exit_code {
-            Some(code) => format!("run-cmd exited with {code} after readiness"),
-            None => "run-cmd terminated after readiness".to_string(),
+            Some(code) => format!("run-cmd exited with {code} after the probe passed"),
+            None => "run-cmd terminated after the probe passed".to_string(),
         },
-        Phase::ReadinessProbeFailed => match &state.probe.last_error {
+        Phase::ProbeFailed => match &state.probe.last_error {
             Some(err) => format!("{} {}: {err}", state.probe.kind, target.describe()),
             None => format!("{} {} never became ready", state.probe.kind, target.describe()),
         },

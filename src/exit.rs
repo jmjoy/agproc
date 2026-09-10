@@ -15,9 +15,9 @@ pub const USAGE: i32 = 2;
 pub const CONFIG: i32 = 3;
 /// `build-cmd` failed (non-zero exit or timeout).
 pub const BUILD_FAILED: i32 = 4;
-/// `run-cmd` exited before readiness.
+/// `run-cmd` exited before the probe passed.
 pub const RUN_FAILED: i32 = 5;
-/// Readiness probe failed.
+/// Probe failed.
 pub const PROBE_FAILED: i32 = 6;
 /// Another start/restart is in progress for this service.
 pub const LOCKED: i32 = 7;

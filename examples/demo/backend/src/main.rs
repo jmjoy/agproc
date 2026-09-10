@@ -9,7 +9,7 @@ fn main() {
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(38080);
 
-    // Printed before readiness: agproc shows this and a tty keeps it line
+    // Printed before the probe passed: agproc shows this and a tty keeps it line
     // buffered even though `cargo run` style tooling would block-buffer a pipe.
     println!("demo-backend listening on http://127.0.0.1:{port}");
     eprintln!("demo-backend: ready for requests");

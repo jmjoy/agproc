@@ -2,7 +2,7 @@
 //!
 //! Why pseudo terminals: when a child's stdout is a pipe or a file, libc-based
 //! runtimes (Python, some Node tooling) switch to *block* buffering, so the log
-//! lines produced before readiness may not be written at all until the buffer
+//! lines produced before the service is up may not be written at all until the buffer
 //! fills or the process exits. With a tty on stdout they stay line buffered and
 //! arrive immediately. Each stream gets its own pty so stdout and stderr remain
 //! distinguishable.

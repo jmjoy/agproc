@@ -172,7 +172,7 @@ run-cmd = "sh -c 'echo serving-frontend; sleep 120'"
         "===== BUILDING =====",
         "===== BUILD SUCCEED =====",
         "===== RUNNING =====",
-        "===== READINESS PROBE PASSED (NO PROBE CONFIGURED) =====",
+        "===== PROBE PASSED (NO PROBE CONFIGURED) =====",
     ] {
         assert!(has(&text, marker), "missing {marker}");
     }
@@ -242,7 +242,7 @@ run-cmd = "sh -c 'echo serve-run; sleep 120'"
     let building = text.find("===== BUILDING =====").expect("BUILDING marker");
     assert!(stopped < building, "restart did not stop first:\n{text}");
     has(&text, "===== BUILD SUCCEED =====");
-    has(&text, "===== READINESS PROBE PASSED");
+    has(&text, "===== PROBE PASSED");
     let second_pid = project.state("api")["child-pid"].as_u64().expect("child pid");
     assert_ne!(first_pid, second_pid, "restart kept the old process");
 }
@@ -277,7 +277,7 @@ run-cmd = "sh -c 'echo only-on-stdout; echo only-on-stderr >&2; sleep 120'"
         "stdout leaked into stderr:\n{stderr}"
     );
     // agproc's own narrative stays on stdout.
-    has(&stdout, "===== READINESS PROBE PASSED");
+    has(&stdout, "===== PROBE PASSED");
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +318,7 @@ run-cmd = "sh -c 'echo crashing; exit 3'"
 }
 
 #[test]
-fn readiness_probe_failure_reports_exit_code_6_and_stops_the_child() {
+fn probe_failure_reports_exit_code_6_and_stops_the_child() {
     let port = free_port();
     let project = Project::new(&format!(
         r#"
@@ -326,14 +326,14 @@ fn readiness_probe_failure_reports_exit_code_6_and_stops_the_child() {
 name = "hopeless"
 build-cmd = "true"
 run-cmd = "sh -c 'echo alive-but-not-listening; sleep 120'"
-readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 2 }}
+probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 2 }}
 "#
     ));
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 6, "{text}");
     has(&text, "===== PROBE ATTEMPT 1/2 FAILED: connection refused");
-    has(&text, "===== READINESS PROBE FAILED: 2 consecutive failures");
-    assert_eq!(project.state("hopeless")["phase"], "readiness-probe-failed");
+    has(&text, "===== PROBE FAILED: 2 consecutive failures");
+    assert_eq!(project.state("hopeless")["phase"], "probe-failed");
 
     // The half-ready child must not be left behind.
     let child = project.state("hopeless")["child-pid"].as_u64();
@@ -346,7 +346,7 @@ readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 
 #[allow(clippy::zombie_processes)] // the test process holds the port on purpose
 fn a_foreign_listener_on_the_probe_port_is_never_reported_as_ready() {
     // Someone else already owns the port and answers the probe: the classic way
-    // a readiness check lies.
+    // a probe can lie.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
     std::thread::spawn(move || {
@@ -364,7 +364,7 @@ fn a_foreign_listener_on_the_probe_port_is_never_reported_as_ready() {
 [[service]]
 name = "victim"
 run-cmd = "sh -c 'echo pretending-to-serve; sleep 120'"
-readiness-probe = {{ http-get = {{ port = {port}, path = "/healthz" }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 2 }}
+probe = {{ http-get = {{ port = {port}, path = "/healthz" }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 2 }}
 "#
     ));
 
@@ -373,8 +373,8 @@ readiness-probe = {{ http-get = {{ port = {port}, path = "/healthz" }}, initial-
     has(&text, "===== WARNING: PORT");
     has(&text, "ALREADY IN USE BY");
     has(&text, "is owned by");
-    assert!(!text.contains("READINESS PROBE PASSED"), "{text}");
-    assert_eq!(project.state("victim")["phase"], "readiness-probe-failed");
+    assert!(!text.contains("PROBE PASSED"), "{text}");
+    assert_eq!(project.state("victim")["phase"], "probe-failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -591,7 +591,7 @@ run-cmd = "sh -c 'i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.3; done'
     assert_eq!(code, 0, "{text}");
     has(&text, "===== RUNNING =====");
     has(&text, "tick-0");
-    has(&text, "===== READINESS PROBE PASSED");
+    has(&text, "===== PROBE PASSED");
 
     let (_, tailed) = project.combined(&["logs", "ticker", "--tail", "1"]);
     assert_eq!(tailed.lines().filter(|l| !l.is_empty()).count(), 1, "{tailed}");
@@ -625,7 +625,7 @@ run-cmd = "sh -c 'echo up; sleep 120'"
 [[service]]
 name = "down"
 run-cmd = "sleep 120"
-readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 1 }}
+probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 1 }}
 "#
     ));
 
@@ -637,7 +637,7 @@ readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 
     let (code, text) = project.combined(&["ps"]);
     assert_eq!(code, 0, "{text}");
     has(&text, "running");
-    has(&text, "readiness probe failed");
+    has(&text, "probe failed");
 
     let ps = project.ps_json();
     let up = ps["services"]
@@ -655,7 +655,7 @@ readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 
     assert_eq!(up["phase"], "running");
     assert_eq!(up["ready"], true);
     assert!(up["uptime_seconds"].as_i64().unwrap_or(-1) >= 0);
-    assert_eq!(down["phase"], "readiness-probe-failed");
+    assert_eq!(down["phase"], "probe-failed");
     assert!(down["probe"]["last_error"].as_str().is_some());
 
     let _ = project.agproc(&["stop"]);
@@ -674,12 +674,12 @@ fn a_listener_owned_by_the_service_counts_as_ready() {
 name = "server"
 build-cmd = "echo preparing"
 run-cmd = "python3 -m http.server {port} --bind 127.0.0.1"
-readiness-probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 3 }}
+probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 3 }}
 "#
     ));
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "a service listening on its own port must be ready:\n{text}");
-    has(&text, "===== READINESS PROBE PASSED");
+    has(&text, "===== PROBE PASSED");
     assert_eq!(project.ps_json()["services"][0]["phase"], "running");
     let _ = project.agproc(&["stop"]);
 }
@@ -692,7 +692,7 @@ fn skills_describe_the_real_services_and_work_anywhere() {
 name = "backend"
 build-cmd = "cargo build"
 run-cmd = "./target/debug/api"
-readiness-probe = { http-get = { port = 3000, path = "/healthz" } }
+probe = { http-get = { port = 3000, path = "/healthz" } }
 "#,
     );
     let (code, text) = project.combined(&["skills"]);

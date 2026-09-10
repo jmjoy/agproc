@@ -18,14 +18,14 @@ agproc skills --json   # same content plus structured project data
 
 ## Why it exists
 
-A project declares its services in `agproc.toml` (build command, run command, readiness
-probe). agproc builds and runs them, waits until they are genuinely ready, and keeps every
+A project declares its services in `agproc.toml` (build command, run command, probe).
+agproc builds and runs them, waits until they are genuinely ready, and keeps every
 process's state and logs under `.agproc/`. Repeated commands are safe:
 
 - `agproc start <service>` is idempotent — it prints `ALREADY RUNNING` and exits 0 instead
   of rebuilding or launching a second copy, so it is safe to call after every edit.
 - `agproc restart <service>` is the edit → restart → read-logs loop.
-- Exit codes are distinct per failure kind (4 build, 5 run, 6 readiness probe, 7 busy).
+- Exit codes are distinct per failure kind (4 build, 5 run, 6 probe, 7 busy).
 
 Do not start these services with `cargo run`, `pnpm dev` and friends: agproc would then be
 unable to stop them, log them or report their state.

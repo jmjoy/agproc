@@ -20,7 +20,7 @@ process's state and logs under `.agproc/`, so calling it repeatedly is safe.
 
 ```bash
 # after editing backend code
-agproc restart backend            # stop + build + run + wait for readiness
+agproc restart backend            # stop + build + run + wait for the probe
 echo $?                           # 0 = ready, 4 = build failed, 5 = run failed, 6 = probe failed
 agproc logs backend --tail 60     # only when the exit code says something went wrong
 
@@ -45,8 +45,8 @@ line with the service name (`backend | ...`); with a single service there is no 
 
 | Command | What it does |
 |---|---|
-| `agproc start [service...]` | build (if any) + run + wait for readiness. No-op when already running |
-| `agproc restart [service...]` | stop, then build + run + wait for readiness |
+| `agproc start [service...]` | build (if any) + run + wait for the probe. No-op when already running |
+| `agproc restart [service...]` | stop, then build + run + wait for the probe |
 | `agproc stop [service...]` | stop a running service or cancel a build that is in progress |
 | `agproc ps [service...] [--json]` | what is running, with phase, pid, uptime and reason |
 | `agproc logs [service...] [--tail N] [-f] [--stream both\|stdout\|stderr] [--all]` | replay or follow logs |
@@ -73,7 +73,7 @@ Flags worth knowing:
 | 3 | configuration error (missing or invalid `agproc.toml`, unknown service name) |
 | 4 | build failed (non-zero exit or timeout) |
 | 5 | run failed (the process exited before becoming ready) |
-| 6 | readiness probe failed |
+| 6 | probe failed |
 | 7 | another start/restart is in progress for this service |
 | 8 | this start was superseded (the service was stopped by another agproc call) |
 
@@ -85,32 +85,32 @@ agproc's own lines always look like `===== LIKE THIS =====`:
 ===== BUILDING =====              build-cmd started
 ===== BUILD SUCCEED =====         build-cmd exited 0
 ===== BUILD FAILED (exit code N) =====
-===== RUNNING =====               run-cmd started, probing for readiness
+===== RUNNING =====               run-cmd started, probing
 ===== PROBE ATTEMPT 2/3 FAILED: connection refused (http://127.0.0.1:3000/healthz) =====
-===== READINESS PROBE PASSED (attempt 2) =====
-===== READINESS PROBE FAILED: 3 consecutive failures, last: ... =====
-===== RUNNING FAILED (exit code N) =====    run-cmd died before readiness
+===== PROBE PASSED (attempt 2) =====
+===== PROBE FAILED: 3 consecutive failures, last: ... =====
+===== RUNNING FAILED (exit code N) =====    run-cmd died before the probe passed
 ===== SERVICE EXITED (exit code N, ready for 12s) =====   it ran, then stopped
 ===== STOPPED =====
 ===== ALREADY RUNNING (pid N, uptime 2m3s, ready) =====
 ===== START IN PROGRESS (pid N, phase building) =====
 ===== WARNING: PORT 3000 ALREADY IN USE BY pid 1234 (node) =====
-===== START FAILED: frontend (readiness probe failed) =====
+===== START FAILED: frontend (probe failed) =====
 ```
 
 ## Service phases (`agproc ps`)
 
 `building`, `starting` (running, not yet ready), `running`, `build failed`, `run failed`,
-`running failed` (it was ready and then exited), `readiness probe failed`, `stopped`,
+`running failed` (it was ready and then exited), `probe failed`, `stopped`,
 `stale` (the supervisor was killed; the next `start` reaps the leftovers and rebuilds).
 
 ## Troubleshooting
 
-- **`readiness probe failed`** — the log names the last probe error. `connection refused`
+- **`probe failed`** — the log names the last probe error. `connection refused`
   means nothing was listening yet or the process died; `HTTP 503` means the service
   answered "not ready". If the process is still alive the probe simply gave up after
   `failure-threshold` attempts; fix the code and `agproc restart <service>`.
-- **`PORT nnnn ALREADY IN USE BY pid N` followed by `READINESS PROBE FAILED: port ... is
+- **`PORT nnnn ALREADY IN USE BY pid N` followed by `PROBE FAILED: port ... is
   owned by ...`** — a foreign process holds the probe port. agproc refuses to report
   success against someone else's process. Free the port (or change it in `agproc.toml`).
 - **exit 7** — a start/restart is already running for that service. Wait for it, or
@@ -126,6 +126,6 @@ agproc's own lines always look like `===== LIKE THIS =====`:
 - Starting services yourself and then wondering why `agproc ps` does not list them.
 - Editing `agproc.toml` and expecting a running service to pick it up: `ps` marks
   `[config changed since start]`; run `agproc restart <service>`.
-- Busy-looping on `agproc ps` right after `start`: `start` already waits for readiness.
+- Busy-looping on `agproc ps` right after `start`: `start` already waits for the probe.
 
 <!-- agproc:project -->

@@ -145,7 +145,7 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
     ));
     out.push_str(&format!("- agproc: `{}`\n\n", env!("CARGO_PKG_VERSION")));
 
-    out.push_str("| service | build-cmd | run-cmd | readiness probe | logs |\n");
+    out.push_str("| service | build-cmd | run-cmd | probe | logs |\n");
     out.push_str("|---|---|---|---|---|\n");
     for service in &loaded.config.services {
         let build = service
@@ -242,12 +242,12 @@ mod tests {
 name = "backend"
 build-cmd = "cargo build"
 run-cmd = "./target/debug/api"
-readiness-probe = { http-get = { port = 3000, path = "/healthz" } }
+probe = { http-get = { port = 3000, path = "/healthz" } }
 
 [[service]]
 name = "frontend"
 run-cmd = "pnpm preview"
-readiness-probe = { tcp-connect = { port = 5173 } }
+probe = { tcp-connect = { port = 5173 } }
 "#,
         );
         let loaded = crate::config::load(&project.config_path).unwrap();

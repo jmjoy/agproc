@@ -5,7 +5,7 @@
 > 给 AI Agent 和人同时使用的**开发时进程管理器**（目前仅支持 Linux）
 
 把项目的常驻服务（后端 / 前端 / worker）写进 `agproc.toml`，agproc 负责
-**build → run → 就绪探针**，并把进程状态与日志落在 `.agproc/`，
+**build → run → 探针**，并把进程状态与日志落在 `.agproc/`，
 于是「反复调用」对人类和 Agent 都是安全的。
 
 ```bash
@@ -22,7 +22,7 @@ agproc stop               # 全部停掉
 |---|---|
 | Agent 改代码频繁，反复触发构建/重启，甚至起出第二个 dev server | `start` 是**幂等**的：服务已在跑时只打印 `ALREADY RUNNING` 并返回 0，不 build、不重启。配合 `run-cmd` 使用**非 watch** 服务（如 `vite preview`），改完代码显式 `restart`，每次行为都可预期 |
 | Rust 项目要先编译再运行，失败信息散落 | `build-cmd` + `run-cmd` 分离，编译失败有专属 marker 与**退出码 4**，Agent 无需解析文本 |
-| 只按「进程还在」判断就绪，误报很多 | 内置 `http-get` / `tcp-connect` 就绪探针，重试到 `failure-threshold` 才判定失败（**退出码 6**） |
+| 只按「进程还在」判断就绪，误报很多 | 内置 `http-get` / `tcp-connect` 探针，重试到 `failure-threshold` 才判定失败（**退出码 6**） |
 | 端口被残留进程占着，探针"对着别人的进程"通过 | 端口预检告警 + 就绪瞬间的**归属校验** + 子进程退出事件优先，三重机制，绝不谎报成功 |
 | 日志被管道块缓冲，就绪前的关键输出看不到 | 每个 stream 一个 PTY，子进程保持**行缓冲**，输出实时可见 |
 
@@ -42,7 +42,7 @@ cargo build --release && install -m755 target/release/agproc ~/.local/bin/
 ```bash
 cd your-project
 agproc init            # 生成 agproc.toml 模板（自动探测 Cargo.toml / package.json）
-$EDITOR agproc.toml    # 填 build-cmd / run-cmd / readiness-probe
+$EDITOR agproc.toml    # 填 build-cmd / run-cmd / probe
 agproc start           # 启动全部并等待就绪
 ```
 
@@ -81,7 +81,7 @@ build-timeout-seconds = 0         # 可选；0 = 不限
 run-cmd = "./target/debug/api"    # 必填；string = <shell> -c，数组 = 直接 exec
 stop-timeout-seconds = 10         # 可选，覆盖 settings
 
-readiness-probe = {               # 可选；省略则「进程存活」即视为就绪
+probe = {                         # 可选；省略则「进程存活」即视为就绪
   http-get = { scheme = "http", host = "127.0.0.1", port = 3000, path = "/healthz" },
   initial-delay-seconds = 1,      # 首次探测前等待
   period-seconds = 1,             # 探测间隔
@@ -90,12 +90,12 @@ readiness-probe = {               # 可选；省略则「进程存活」即视�
 }
 ```
 
-`readiness-probe` 也可以写成 TCP 连通性探测：
+`probe` 也可以写成 TCP 连通性探测：
 
 ```toml
-readiness-probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
-                    initial-delay-seconds = 1, period-seconds = 1,
-                    timeout-seconds = 2, failure-threshold = 3 }
+probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
+          initial-delay-seconds = 1, period-seconds = 1,
+          timeout-seconds = 2, failure-threshold = 3 }
 ```
 
 规则：
@@ -113,8 +113,8 @@ agproc 自己的日志统一是 `===== XXX =====`：
 ===== BUILD SUCCEED =====            —— 失败则是 ===== BUILD FAILED (exit code 101) =====
 ===== RUNNING =====
 ===== PROBE ATTEMPT 2/3 FAILED: connection refused (http://127.0.0.1:3000/healthz) =====
-===== READINESS PROBE PASSED (attempt 2) =====
-===== READINESS PROBE FAILED: 3 consecutive failures, last: ... =====
+===== PROBE PASSED (attempt 2) =====
+===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code 1) =====
 ===== SERVICE EXITED (exit code 0, ready for 12s) =====
 ===== STOPPED ===== / ===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
@@ -138,14 +138,14 @@ agproc 自己的日志统一是 `===== XXX =====`：
 | 3 | 配置错误（找不到或非法 `agproc.toml`、未知 service 名） |
 | 4 | build 失败（非零退出或超时） |
 | 5 | run 失败（就绪前退出） |
-| 6 | 就绪探针失败 |
+| 6 | 探针失败 |
 | 7 | 该 service 已有 start/restart 在进行 |
 | 8 | 本次 start 被其他 agproc 调用取代（例如被 `stop` 打断） |
 
 ## 状态（`agproc ps`）
 
 `building`、`starting`（已运行未就绪）、`running`、`build failed`、`run failed`、
-`running failed`（就绪后又退出）、`readiness probe failed`、`stopped`、
+`running failed`（就绪后又退出）、`probe failed`、`stopped`、
 `stale`（runner 被 `kill -9`；下次 `start` 会先清理残留进程组再重建）。
 
 `agproc ps --json` 提供稳定结构（`phase` / `pid` / `runner_pid` / `child_pid` / `uptime_seconds` /

@@ -1,7 +1,7 @@
 //! `agproc __runner` — the detached per-service supervisor.
 //!
 //! One runner owns exactly one service for one session. It performs
-//! build-cmd -> run-cmd -> readiness-probe, streams both pty streams into the
+//! build-cmd -> run-cmd -> probe, streams both pty streams into the
 //! service log files, and is the single authority on the service's lifecycle:
 //! the child exit status is recorded even if a probe result arrived a moment
 //! earlier, so a probe can never report a service that is already dead.
@@ -296,14 +296,14 @@ fn inner(args: Args) -> Result<i32> {
                     session.state.probe.attempts = attempts;
                     running.terminate(stop_timeout)?;
                     return session.finish(
-                        Phase::ReadinessProbeFailed,
-                        &format!("READINESS PROBE FAILED: {reason}"),
+                        Phase::ProbeFailed,
+                        &format!("PROBE FAILED: {reason}"),
                     );
                 }
                 Ownership::Unexpected(listener) => {
                     let port = target.local_port().unwrap_or(0);
                     session.marker(&format!(
-                        "WARNING: PORT {port} IS HELD BY {} (not part of this service); the readiness result may be misleading",
+                        "WARNING: PORT {port} IS HELD BY {} (not part of this service); the probe result may be misleading",
                         listener.describe()
                     ))?;
                 }
@@ -315,8 +315,8 @@ fn inner(args: Args) -> Result<i32> {
             session.state.probe.attempts = attempts;
             session.state.phase = Phase::Running;
             let marker = match target {
-                ProbeTarget::None => "READINESS PROBE PASSED (NO PROBE CONFIGURED)".to_string(),
-                _ => format!("READINESS PROBE PASSED (attempt {attempts})"),
+                ProbeTarget::None => "PROBE PASSED (NO PROBE CONFIGURED)".to_string(),
+                _ => format!("PROBE PASSED (attempt {attempts})"),
             };
             session.marker(&marker)?;
             session.publish()?;
@@ -332,9 +332,9 @@ fn inner(args: Args) -> Result<i32> {
             // cleanly instead of tripping over a half-ready process.
             running.terminate(stop_timeout)?;
             return session.finish(
-                Phase::ReadinessProbeFailed,
+                Phase::ProbeFailed,
                 &format!(
-                    "READINESS PROBE FAILED: {failures} consecutive failures, last: {last_error} ({})",
+                    "PROBE FAILED: {failures} consecutive failures, last: {last_error} ({})",
                     target.describe()
                 ),
             );
@@ -577,7 +577,7 @@ struct ProbeRunner {
 
 impl ProbeRunner {
     fn new(service: &Service, target: &ProbeTarget, now: Instant) -> Self {
-        let probe = service.readiness_probe.as_ref();
+        let probe = service.probe.as_ref();
         let (tx, rx) = channel();
         Self {
             target: target.clone(),

@@ -16,7 +16,7 @@ use crate::runner;
     version,
     about = "Dev-time process manager for AI agents and humans",
     long_about = "agproc runs the services of a project (backend, frontend, ...) declared in agproc.toml:\n\
-                  it builds them, runs them, waits for a readiness probe and keeps state and logs under\n\
+                  it builds them, runs them, waits for a probe and keeps state and logs under\n\
                   .agproc/, so repeated commands are safe for both humans and agents.",
     disable_help_subcommand = true
 )]
@@ -31,7 +31,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Build (when needed) and run services, then wait for readiness
+    /// Build (when needed) and run services, then wait for the probe
     Start(StartArgs),
     /// Stop running services, then build and run them again
     Restart(StartArgs),

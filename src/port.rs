@@ -1,5 +1,5 @@
 //! Local port ownership, used to defeat the nastiest false positive a
-//! readiness probe can produce: passing against a *foreign* listener while our
+//! probe can produce: passing against a *foreign* listener while our
 //! own `run-cmd` is already dead because it could not bind the port.
 //!
 //! Three mechanisms work together (see the plan): the preflight check records

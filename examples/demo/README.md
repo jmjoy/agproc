@@ -7,7 +7,7 @@ run command, so every `agproc restart` is meaningful.
 ```bash
 cd examples/demo
 
-agproc start                 # both services, prefixed output, waits for readiness
+agproc start                 # both services, prefixed output, waits for the probe
 agproc ps                    # running / pid / uptime
 curl http://127.0.0.1:38080/healthz
 agproc start backend         # -> ALREADY RUNNING, exit 0, no rebuild
@@ -17,7 +17,7 @@ agproc stop                  # nothing left running
 ```
 
 Watch the exit codes: `start` returns 4 for a build failure, 5 when the process
-dies before readiness, 6 when the readiness probe fails.
+dies before the probe passed, 6 when the probe fails.
 
 > This demo lives in the Git repository only. It contains a nested crate
 > (`backend/`), which cargo never packages, so the published `agproc` crate

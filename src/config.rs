@@ -64,7 +64,7 @@ pub struct Service {
     #[serde(default)]
     pub stop_timeout_seconds: Option<u64>,
     #[serde(default)]
-    pub readiness_probe: Option<Probe>,
+    pub probe: Option<Probe>,
 }
 
 /// A command is either a shell string (`sh -c "..."`) or an argv array that is
@@ -148,7 +148,7 @@ fn default_path() -> String {
     "/".to_string()
 }
 
-/// The resolved readiness target.
+/// The resolved probe target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeTarget {
     Http {
@@ -161,7 +161,7 @@ pub enum ProbeTarget {
         host: String,
         port: u16,
     },
-    /// No probe configured: readiness is "still alive after the initial delay".
+    /// No probe configured: the service is ready once it is "still alive after the initial delay".
     None,
 }
 
@@ -237,7 +237,7 @@ impl Service {
     }
 
     pub fn target(&self) -> ProbeTarget {
-        self.readiness_probe
+        self.probe
             .as_ref()
             .map(Probe::target)
             .unwrap_or(ProbeTarget::None)
@@ -324,7 +324,7 @@ fn validate_service(service: &Service) -> Result<()> {
     {
         bail!("service \"{name}\": build-cmd array must not be empty");
     }
-    if let Some(probe) = &service.readiness_probe {
+    if let Some(probe) = &service.probe {
         validate_probe(name, probe)?;
     }
     Ok(())
@@ -333,43 +333,43 @@ fn validate_service(service: &Service) -> Result<()> {
 fn validate_probe(name: &str, probe: &Probe) -> Result<()> {
     match (&probe.http_get, &probe.tcp_connect) {
         (Some(_), Some(_)) => bail!(
-            "service \"{name}\": readiness-probe must set exactly one of http-get / tcp-connect, found both"
+            "service \"{name}\": probe must set exactly one of http-get / tcp-connect, found both"
         ),
         (None, None) => bail!(
-            "service \"{name}\": readiness-probe must set http-get or tcp-connect (remove the table to use liveness only)"
+            "service \"{name}\": probe must set http-get or tcp-connect (remove the table to use liveness only)"
         ),
         _ => {}
     }
     if let Some(http) = &probe.http_get {
         if http.scheme != "http" {
             bail!(
-                "service \"{name}\": readiness-probe scheme {:?} is not supported; only \"http\" is (local dev endpoints)",
+                "service \"{name}\": probe scheme {:?} is not supported; only \"http\" is (local dev endpoints)",
                 http.scheme
             );
         }
         if http.port == 0 {
-            bail!("service \"{name}\": readiness-probe port must not be 0");
+            bail!("service \"{name}\": probe port must not be 0");
         }
         if http.host.trim().is_empty() {
-            bail!("service \"{name}\": readiness-probe host must not be empty");
+            bail!("service \"{name}\": probe host must not be empty");
         }
     }
     if let Some(tcp) = &probe.tcp_connect {
         if tcp.port == 0 {
-            bail!("service \"{name}\": readiness-probe port must not be 0");
+            bail!("service \"{name}\": probe port must not be 0");
         }
         if tcp.host.trim().is_empty() {
-            bail!("service \"{name}\": readiness-probe host must not be empty");
+            bail!("service \"{name}\": probe host must not be empty");
         }
     }
     if probe.failure_threshold == 0 {
-        bail!("service \"{name}\": readiness-probe failure-threshold must be at least 1");
+        bail!("service \"{name}\": probe failure-threshold must be at least 1");
     }
     if probe.period_seconds == 0 {
-        bail!("service \"{name}\": readiness-probe period-seconds must be at least 1");
+        bail!("service \"{name}\": probe period-seconds must be at least 1");
     }
     if probe.timeout_seconds == 0 {
-        bail!("service \"{name}\": readiness-probe timeout-seconds must be at least 1");
+        bail!("service \"{name}\": probe timeout-seconds must be at least 1");
     }
     Ok(())
 }
@@ -392,7 +392,7 @@ mod tests {
 name = "backend"
 build-cmd = "cargo build"
 run-cmd = "./target/debug/foo-backend"
-readiness-probe = {
+probe = {
   http-get = { scheme = "http", host = "127.0.0.1", path = "/healthz", port = 3100 },
   initial-delay-seconds = 1,
   period-seconds = 1,
@@ -409,7 +409,7 @@ readiness-probe = {
             "http://127.0.0.1:3100/healthz"
         );
         assert_eq!(service.target().local_port(), Some(3100));
-        let probe = service.readiness_probe.as_ref().unwrap();
+        let probe = service.probe.as_ref().unwrap();
         assert_eq!(probe.failure_threshold, 3);
         assert_eq!(probe.period_seconds, 1);
     }
@@ -421,11 +421,11 @@ readiness-probe = {
 [[service]]
 name = "api"
 run-cmd = "sleep 1"
-readiness-probe = { tcp-connect = { port = 5432 } }
+probe = { tcp-connect = { port = 5432 } }
 "#,
         )
         .unwrap();
-        let probe = config.services[0].readiness_probe.as_ref().unwrap();
+        let probe = config.services[0].probe.as_ref().unwrap();
         assert_eq!(probe.initial_delay_seconds, 1);
         assert_eq!(probe.period_seconds, 1);
         assert_eq!(probe.timeout_seconds, 2);
@@ -456,7 +456,7 @@ run_cmd = "true"
 [[service]]
 name = "backend"
 run-cmd = "true"
-readiness-probe = { tcp-connect = { port = 1, }, },
+probe = { tcp-connect = { port = 1, }, },
 "#,
         )
         .unwrap_err();
@@ -499,7 +499,7 @@ name = "a"
 [[service]]
 name = "a"
 run-cmd = "true"
-readiness-probe = { http-get = { port = 1 }, tcp-connect = { port = 2 } }
+probe = { http-get = { port = 1 }, tcp-connect = { port = 2 } }
 "#,
         )
         .unwrap_err();
@@ -510,7 +510,7 @@ readiness-probe = { http-get = { port = 1 }, tcp-connect = { port = 2 } }
 [[service]]
 name = "a"
 run-cmd = "true"
-readiness-probe = { period-seconds = 1 }
+probe = { period-seconds = 1 }
 "#,
         )
         .unwrap_err();
@@ -524,7 +524,7 @@ readiness-probe = { period-seconds = 1 }
 [[service]]
 name = "a"
 run-cmd = "true"
-readiness-probe = { http-get = { scheme = "https", port = 443 } }
+probe = { http-get = { scheme = "https", port = 443 } }
 "#,
         )
         .unwrap_err();
@@ -583,7 +583,7 @@ run-cmd = "true"
 [[service]]
 name = "a"
 run-cmd = "true"
-readiness-probe = { http-get = { host = "example.com", port = 80 } }
+probe = { http-get = { host = "example.com", port = 80 } }
 "#,
         )
         .unwrap();
