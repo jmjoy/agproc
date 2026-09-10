@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>agproc demo frontend</title>
+    <style>
+      body { font: 16px/1.6 system-ui, sans-serif; margin: 4rem auto; max-width: 40rem; }
+      code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
+      .ok { color: #16794c; }
+    </style>
+  </head>
+  <body>
+    <h1 class="ok">frontend is up</h1>
+    <p>
+      Served by <code>python3 -m http.server 38081</code>, a deliberately
+      <strong>non-watching</strong> run command: agproc restarts it explicitly.
+    </p>
+    <p>
+      The backend is on <a href="http://127.0.0.1:38080/healthz">127.0.0.1:38080</a>
+      (<code>agproc restart backend</code> to recompile and restart it).
+    </p>
+  </body>
+</html>

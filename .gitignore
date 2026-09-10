@@ -1,0 +1,4 @@
+/target
+# agproc's own runtime directory (state, logs, locks) for this repository
+.agproc/
+examples/demo/backend/target/

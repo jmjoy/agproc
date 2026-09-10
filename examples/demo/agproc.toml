@@ -1,0 +1,38 @@
+# agproc demo project
+#
+#   cd examples/demo
+#   agproc start          # builds and runs both services, waits for readiness
+#   agproc ps             # what is running
+#   agproc logs -f        # live logs from both services, labelled
+#   agproc restart backend
+#   agproc stop
+
+[settings]
+stop-timeout-seconds = 5
+
+[[service]]
+name = "backend"
+cwd = "backend"
+build-cmd = "cargo build"
+run-cmd = "./target/debug/demo-backend 38080"
+readiness-probe = {
+  http-get = { scheme = "http", host = "127.0.0.1", port = 38080, path = "/healthz" },
+  initial-delay-seconds = 1,
+  period-seconds = 1,
+  timeout-seconds = 2,
+  failure-threshold = 3,
+}
+
+[[service]]
+name = "frontend"
+cwd = "frontend"
+# Deliberately NOT a watching dev server: agproc restarts services explicitly,
+# so a non-watch server keeps every restart meaningful.
+run-cmd = "python3 -m http.server 38081 --bind 127.0.0.1"
+readiness-probe = {
+  tcp-connect = { host = "127.0.0.1", port = 38081 },
+  initial-delay-seconds = 1,
+  period-seconds = 1,
+  timeout-seconds = 2,
+  failure-threshold = 3,
+}

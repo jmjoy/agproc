@@ -1,0 +1,790 @@
+//! End-to-end tests: they run the real binary against throwaway projects in
+//! temporary directories, and always clean up after themselves.
+
+use serde_json::Value;
+use std::io::Write;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{Duration, Instant};
+
+fn bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_agproc"))
+}
+
+/// A throwaway project whose services are stopped when the test ends.
+struct Project {
+    dir: tempfile::TempDir,
+    _stop_on_drop: (),
+}
+
+impl Project {
+    fn new(config: &str) -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("agproc.toml"), config).expect("write config");
+        Self {
+            dir,
+            _stop_on_drop: (),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn file(&self, relative: &str) -> PathBuf {
+        self.dir.path().join(relative)
+    }
+
+    fn write(&self, relative: &str, contents: &str) {
+        std::fs::write(self.file(relative), contents).expect("write file");
+    }
+
+    fn read(&self, relative: &str) -> String {
+        std::fs::read_to_string(self.file(relative))
+            .unwrap_or_else(|err| panic!("cannot read {relative}: {err}"))
+    }
+
+    fn agproc(&self, args: &[&str]) -> Output {
+        Command::new(bin())
+            .current_dir(self.dir.path())
+            .args(args)
+            .output()
+            .expect("run agproc")
+    }
+
+    /// `agproc` with stdout and stderr merged, which is how an agent harness
+    /// usually sees it.
+    fn combined(&self, args: &[&str]) -> (i32, String) {
+        let output = self.agproc(args);
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.code().unwrap_or(-1), text)
+    }
+
+    fn state(&self, service: &str) -> Value {
+        let raw = std::fs::read_to_string(self.file(&format!(".agproc/state/{service}.json")))
+            .unwrap_or_else(|err| panic!("cannot read state of {service}: {err}"));
+        serde_json::from_str(&raw).expect("valid state json")
+    }
+
+    fn ps_json(&self) -> Value {
+        let (code, text) = self.combined(&["ps", "--json"]);
+        assert_eq!(code, 0, "ps --json failed: {text}");
+        serde_json::from_str(&text).expect("valid ps json")
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = self.agproc(&["stop"]);
+        // Belt and braces: kill anything the state files still point at.
+        for entry in std::fs::read_dir(self.file(".agproc/state"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            for key in ["runner-pid", "child-pid"] {
+                if let Some(pid) = state.get(key).and_then(Value::as_u64) {
+                    let _ = Command::new("kill")
+                        .args(["-9", &pid.to_string()])
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
+        }
+    }
+}
+
+/// A port that was free a moment ago. Tests allocate their own so they can run
+/// in parallel.
+fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
+}
+
+fn python3_available() -> bool {
+    Command::new("python3")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+fn has(text: &str, needle: &str) -> bool {
+    assert!(
+        text.contains(needle),
+        "expected {needle:?} in output:\n{text}"
+    );
+    true
+}
+
+/// Wait until a predicate holds, failing the test on timeout.
+fn wait_for(label: &str, mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {label}");
+}
+
+// ---------------------------------------------------------------------------
+// happy path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn starts_all_services_with_prefixes_and_stops_them() {
+    let project = Project::new(
+        r#"
+[settings]
+stop-timeout-seconds = 2
+
+[[service]]
+name = "backend"
+build-cmd = "echo building-backend"
+run-cmd = "sh -c 'echo serving-backend; sleep 120'"
+
+[[service]]
+name = "frontend"
+build-cmd = "echo building-frontend"
+run-cmd = "sh -c 'echo serving-frontend; sleep 120'"
+"#,
+    );
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "start failed:\n{text}");
+    for marker in [
+        "===== BUILDING =====",
+        "===== BUILD SUCCEED =====",
+        "===== RUNNING =====",
+        "===== READINESS PROBE PASSED (NO PROBE CONFIGURED) =====",
+    ] {
+        assert!(has(&text, marker), "missing {marker}");
+    }
+    // Multi-service invocations label every line.
+    has(&text, "backend | ===== BUILDING =====");
+    has(&text, "frontend | ===== RUNNING =====");
+    has(&text, "backend | serving-backend");
+    has(&text, "frontend | serving-frontend");
+
+    let ps = project.ps_json();
+    for name in ["backend", "frontend"] {
+        let service = ps["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .find(|service| service["name"] == name)
+            .unwrap_or_else(|| panic!("{name} not listed in {ps}"));
+        assert_eq!(service["phase"], "running", "{name} not running: {ps}");
+        assert!(service["child_pid"].as_u64().unwrap_or(0) > 0);
+    }
+
+    let (code, text) = project.combined(&["stop"]);
+    assert_eq!(code, 0, "stop failed:\n{text}");
+    has(&text, "backend | ===== STOPPED =====");
+    has(&text, "frontend | ===== STOPPED =====");
+
+    let ps = project.ps_json();
+    for service in ps["services"].as_array().expect("services array") {
+        assert_eq!(service["phase"], "stopped", "{service}");
+    }
+    // Idempotent: stopping again is not an error.
+    let (code, text) = project.combined(&["stop"]);
+    assert_eq!(code, 0);
+    has(&text, "===== NOT RUNNING =====");
+}
+
+#[test]
+fn start_is_idempotent_and_restart_rebuilds() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+build-cmd = "echo build-run"
+run-cmd = "sh -c 'echo serve-run; sleep 120'"
+"#,
+    );
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    let first_pid = project.state("api")["child-pid"].as_u64().expect("child pid");
+
+    // A second start must not rebuild, restart or complain.
+    let (code, text) = project.combined(&["start", "api"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "===== ALREADY RUNNING");
+    assert!(!text.contains("BUILDING"), "start rebuilt an running service:\n{text}");
+    assert_eq!(
+        project.state("api")["child-pid"].as_u64(),
+        Some(first_pid),
+        "start replaced the running process"
+    );
+
+    // Restart stops it and runs the whole sequence again.
+    let (code, text) = project.combined(&["restart", "api"]);
+    assert_eq!(code, 0, "{text}");
+    let stopped = text.find("===== STOPPED =====").expect("STOPPED marker");
+    let building = text.find("===== BUILDING =====").expect("BUILDING marker");
+    assert!(stopped < building, "restart did not stop first:\n{text}");
+    has(&text, "===== BUILD SUCCEED =====");
+    has(&text, "===== READINESS PROBE PASSED");
+    let second_pid = project.state("api")["child-pid"].as_u64().expect("child pid");
+    assert_ne!(first_pid, second_pid, "restart kept the old process");
+}
+
+// ---------------------------------------------------------------------------
+// streams
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stdout_and_stderr_stay_separate() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "chatty"
+run-cmd = "sh -c 'echo only-on-stdout; echo only-on-stderr >&2; sleep 120'"
+"#,
+    );
+
+    let output = project.agproc(&["start"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    has(&stdout, "only-on-stdout");
+    has(&stderr, "only-on-stderr");
+    assert!(
+        !stdout.contains("only-on-stderr"),
+        "stderr leaked into stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("only-on-stdout"),
+        "stdout leaked into stderr:\n{stderr}"
+    );
+    // agproc's own narrative stays on stdout.
+    has(&stdout, "===== READINESS PROBE PASSED");
+}
+
+// ---------------------------------------------------------------------------
+// failures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_failure_reports_exit_code_4() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "badbuild"
+build-cmd = "echo compile-error; exit 101"
+run-cmd = "sleep 120"
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 4, "{text}");
+    has(&text, "===== BUILD FAILED (exit code 101) =====");
+    has(&text, "===== START FAILED: badbuild (build failed) =====");
+    assert_eq!(project.state("badbuild")["phase"], "build-failed");
+}
+
+#[test]
+fn run_failure_reports_exit_code_5() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "instant"
+build-cmd = "true"
+run-cmd = "sh -c 'echo crashing; exit 3'"
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 5, "{text}");
+    has(&text, "===== RUNNING FAILED (exit code 3) =====");
+    assert_eq!(project.state("instant")["phase"], "run-failed");
+}
+
+#[test]
+fn readiness_probe_failure_reports_exit_code_6_and_stops_the_child() {
+    let port = free_port();
+    let project = Project::new(&format!(
+        r#"
+[[service]]
+name = "hopeless"
+build-cmd = "true"
+run-cmd = "sh -c 'echo alive-but-not-listening; sleep 120'"
+readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 2 }}
+"#
+    ));
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 6, "{text}");
+    has(&text, "===== PROBE ATTEMPT 1/2 FAILED: connection refused");
+    has(&text, "===== READINESS PROBE FAILED: 2 consecutive failures");
+    assert_eq!(project.state("hopeless")["phase"], "readiness-probe-failed");
+
+    // The half-ready child must not be left behind.
+    let child = project.state("hopeless")["child-pid"].as_u64();
+    wait_for("the failed child to disappear", || {
+        child.map(|pid| !Path::new(&format!("/proc/{pid}")).exists()) == Some(true)
+    });
+}
+
+#[test]
+#[allow(clippy::zombie_processes)] // the test process holds the port on purpose
+fn a_foreign_listener_on_the_probe_port_is_never_reported_as_ready() {
+    // Someone else already owns the port and answers the probe: the classic way
+    // a readiness check lies.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 512];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            let _ = stream.flush();
+        }
+    });
+
+    let project = Project::new(&format!(
+        r#"
+[[service]]
+name = "victim"
+run-cmd = "sh -c 'echo pretending-to-serve; sleep 120'"
+readiness-probe = {{ http-get = {{ port = {port}, path = "/healthz" }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 2 }}
+"#
+    ));
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 6, "a foreign listener must not count as ready:\n{text}");
+    has(&text, "===== WARNING: PORT");
+    has(&text, "ALREADY IN USE BY");
+    has(&text, "is owned by");
+    assert!(!text.contains("READINESS PROBE PASSED"), "{text}");
+    assert_eq!(project.state("victim")["phase"], "readiness-probe-failed");
+}
+
+// ---------------------------------------------------------------------------
+// locking, staleness, lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_second_start_reports_the_running_one_instead_of_racing() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "slow"
+build-cmd = "echo building; sleep 4; echo built"
+run-cmd = "sh -c 'echo serving; sleep 120'"
+"#,
+    );
+
+    let dir = project.path().to_path_buf();
+    let handle = std::thread::spawn(move || {
+        Command::new(bin())
+            .current_dir(&dir)
+            .args(["start", "slow"])
+            .output()
+            .expect("first start")
+    });
+
+    // Wait until the build is genuinely in flight, then race a second start.
+    let state_path = project.file(".agproc/state/slow.json");
+    wait_for("the build to start", || {
+        std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .map(|state| state["phase"] == "building")
+            .unwrap_or(false)
+    });
+
+    let (code, text) = project.combined(&["start", "slow"]);
+    assert_eq!(code, 7, "concurrent start must be rejected:\n{text}");
+    has(&text, "===== START IN PROGRESS");
+
+    let first = handle.join().expect("first start thread");
+    assert_eq!(first.status.code(), Some(0));
+}
+
+#[test]
+fn stop_cancels_a_build_in_progress() {
+    let project = Project::new(
+        r#"
+[settings]
+stop-timeout-seconds = 2
+
+[[service]]
+name = "slowbuild"
+build-cmd = "echo building-slowly; sleep 60; echo never"
+run-cmd = "sleep 60"
+"#,
+    );
+
+    let dir = project.path().to_path_buf();
+    let handle = std::thread::spawn(move || {
+        Command::new(bin())
+            .current_dir(&dir)
+            .args(["start", "slowbuild"])
+            .output()
+            .expect("start")
+    });
+
+    let state_path = project.file(".agproc/state/slowbuild.json");
+    wait_for("the build to start", || {
+        std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .map(|state| state["phase"] == "building")
+            .unwrap_or(false)
+    });
+
+    let (code, text) = project.combined(&["stop", "slowbuild"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "===== STOPPED");
+
+    // The waiting start reports that it was superseded, not that it succeeded.
+    let waiting = handle.join().expect("start thread");
+    assert_eq!(waiting.status.code(), Some(8));
+
+    let build_pid = project.state("slowbuild")["child-pid"].as_u64();
+    if let Some(pid) = build_pid {
+        wait_for("the cancelled build to exit", || {
+            !Path::new(&format!("/proc/{pid}")).exists()
+        });
+    }
+}
+
+#[test]
+fn a_killed_runner_is_reported_as_stale_and_start_recovers() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = "sh -c 'echo serving; sleep 120'"
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+
+    let runner = project.state("api")["runner-pid"].as_u64().expect("runner pid");
+    let killed = Command::new("kill")
+        .args(["-9", &runner.to_string()])
+        .status()
+        .expect("kill runner");
+    assert!(killed.success());
+
+    wait_for("the state to look stale", || {
+        project.ps_json()["services"][0]["phase"] == "stale"
+    });
+
+    // Recovery: start must reap the leftover process group and succeed.
+    let (code, text) = project.combined(&["start", "api"]);
+    assert_eq!(code, 0, "start did not recover from a killed runner:\n{text}");
+    assert_eq!(project.ps_json()["services"][0]["phase"], "running");
+}
+
+#[test]
+fn cli_timeout_leaves_the_runner_working() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "slowpoke"
+build-cmd = "sleep 5; echo built"
+run-cmd = "sh -c 'echo serving; sleep 120'"
+"#,
+    );
+    let (code, text) = project.combined(&["start", "--timeout-seconds", "1"]);
+    assert_eq!(code, 1, "{text}");
+    has(&text, "===== STILL STARTING");
+
+    // The runner keeps going, so the service eventually comes up on its own.
+    wait_for("the service to finish starting", || {
+        let ps = project.ps_json();
+        ps["services"][0]["phase"] == "running"
+    });
+}
+
+// ---------------------------------------------------------------------------
+// logs, ps, skills, init
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stop_signals_every_service_concurrently() {
+    // Both services need 2s to drain on SIGTERM. A sequential `stop` would
+    // signal them ~2s apart; in parallel the signals land together.
+    let project = Project::new(
+        r#"
+[settings]
+stop-timeout-seconds = 10
+
+[[service]]
+name = "a"
+run-cmd = "sh slow-stop.sh a"
+
+[[service]]
+name = "b"
+run-cmd = "sh slow-stop.sh b"
+"#,
+    );
+    project.write(
+        "slow-stop.sh",
+        "name=\"$1\"\n\
+         trap 'date +%s.%N > drain-'\"$name\"'.stamp; sleep 2; exit 0' TERM\n\
+         while true; do sleep 0.2; done\n",
+    );
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+
+    let started = Instant::now();
+    let (code, text) = project.combined(&["stop"]);
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0, "{text}");
+
+    let a: f64 = project
+        .read("drain-a.stamp")
+        .trim()
+        .parse()
+        .expect("service a recorded when it was signalled");
+    let b: f64 = project
+        .read("drain-b.stamp")
+        .trim()
+        .parse()
+        .expect("service b recorded when it was signalled");
+    let apart = (a - b).abs();
+    assert!(
+        apart < 1.0,
+        "services were signalled {apart:.2}s apart, so stop is not parallel (took {elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "stop took {elapsed:?}; two 2s drains must not add up"
+    );
+}
+
+#[test]
+fn logs_replay_the_last_session_and_follow_returns_on_stop() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "ticker"
+run-cmd = "sh -c 'i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.3; done'"
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+
+    let (code, text) = project.combined(&["logs", "ticker"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "===== RUNNING =====");
+    has(&text, "tick-0");
+    has(&text, "===== READINESS PROBE PASSED");
+
+    let (_, tailed) = project.combined(&["logs", "ticker", "--tail", "1"]);
+    assert_eq!(tailed.lines().filter(|l| !l.is_empty()).count(), 1, "{tailed}");
+
+    // `-f` must come back by itself once the service is gone.
+    let dir = project.path().to_path_buf();
+    let handle = std::thread::spawn(move || {
+        Command::new(bin())
+            .current_dir(&dir)
+            .args(["logs", "-f"])
+            .output()
+            .expect("logs -f")
+    });
+    std::thread::sleep(Duration::from_millis(600));
+    let _ = project.agproc(&["stop"]);
+    let followed = handle.join().expect("follow thread");
+    let text = String::from_utf8_lossy(&followed.stdout).into_owned();
+    assert_eq!(followed.status.code(), Some(0));
+    has(&text, "===== STOPPED =====");
+}
+
+#[test]
+fn ps_reports_states_and_json_stays_parseable() {
+    let port = free_port();
+    let project = Project::new(&format!(
+        r#"
+[[service]]
+name = "up"
+run-cmd = "sh -c 'echo up; sleep 120'"
+
+[[service]]
+name = "down"
+run-cmd = "sleep 120"
+readiness-probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 1 }}
+"#
+    ));
+
+    let (code, text) = project.combined(&["start", "up"]);
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = project.combined(&["start", "down"]);
+    assert_eq!(code, 6, "{text}");
+
+    let (code, text) = project.combined(&["ps"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "running");
+    has(&text, "readiness probe failed");
+
+    let ps = project.ps_json();
+    let up = ps["services"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|s| s["name"] == "up")
+        .expect("up listed");
+    let down = ps["services"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|s| s["name"] == "down")
+        .expect("down listed");
+    assert_eq!(up["phase"], "running");
+    assert_eq!(up["ready"], true);
+    assert!(up["uptime_seconds"].as_i64().unwrap_or(-1) >= 0);
+    assert_eq!(down["phase"], "readiness-probe-failed");
+    assert!(down["probe"]["last_error"].as_str().is_some());
+
+    let _ = project.agproc(&["stop"]);
+}
+
+#[test]
+fn a_listener_owned_by_the_service_counts_as_ready() {
+    if !python3_available() {
+        eprintln!("skipping: python3 is not available");
+        return;
+    }
+    let port = free_port();
+    let project = Project::new(&format!(
+        r#"
+[[service]]
+name = "server"
+build-cmd = "echo preparing"
+run-cmd = "python3 -m http.server {port} --bind 127.0.0.1"
+readiness-probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 3 }}
+"#
+    ));
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "a service listening on its own port must be ready:\n{text}");
+    has(&text, "===== READINESS PROBE PASSED");
+    assert_eq!(project.ps_json()["services"][0]["phase"], "running");
+    let _ = project.agproc(&["stop"]);
+}
+
+#[test]
+fn skills_describe_the_real_services_and_work_anywhere() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "backend"
+build-cmd = "cargo build"
+run-cmd = "./target/debug/api"
+readiness-probe = { http-get = { port = 3000, path = "/healthz" } }
+"#,
+    );
+    let (code, text) = project.combined(&["skills"]);
+    assert_eq!(code, 0);
+    has(&text, "## This project");
+    has(&text, "`cargo build`");
+    has(&text, "./target/debug/api");
+    has(&text, "http://127.0.0.1:3000/healthz");
+    has(&text, "agproc restart backend");
+    has(&text, "===== ALREADY RUNNING");
+
+    let (code, text) = project.combined(&["skills", "--json"]);
+    assert_eq!(code, 0);
+    let json: Value = serde_json::from_str(&text).expect("valid json");
+    assert_eq!(json["services"][0]["name"], "backend");
+    assert_eq!(json["services"][0]["probe_kind"], "http-get");
+
+    // Outside a project it still teaches the agent how to set one up.
+    let empty = tempfile::tempdir().expect("temp dir");
+    let output = Command::new(bin())
+        .current_dir(empty.path())
+        .args(["skills"])
+        .output()
+        .expect("skills");
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
+    has(&text, "generic guide");
+    has(&text, "agproc init");
+}
+
+#[test]
+fn init_writes_a_template_and_gitignore_entry() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["init"])
+        .output()
+        .expect("init");
+    assert_eq!(output.status.code(), Some(0));
+
+    let config = std::fs::read_to_string(dir.path().join("agproc.toml")).expect("config written");
+    assert!(config.contains("[[service]]") || config.contains("# [[service]]"));
+    let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
+    assert!(gitignore.contains(".agproc/"));
+
+    let again = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["init"])
+        .output()
+        .expect("init again");
+    assert_ne!(again.status.code(), Some(0), "init overwrote without --force");
+}
+
+#[test]
+fn configuration_errors_exit_with_3() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = "sleep 1"
+"#,
+    );
+    let (code, text) = project.combined(&["start", "nope"]);
+    assert_eq!(code, 3, "{text}");
+    has(&text, "===== CONFIG ERROR =====");
+    has(&text, "unknown service");
+
+    let broken = Project::new(
+        r#"
+[[service]]
+name = "api"
+run_cmd = "sleep 1"
+"#,
+    );
+    let (code, text) = broken.combined(&["ps"]);
+    assert_eq!(code, 3, "{text}");
+    has(&text, "run_cmd");
+}
+
+#[test]
+fn unknown_flags_and_missing_config_are_usage_or_config_errors() {
+    let project = Project::new("[[service]]\nname = \"a\"\nrun-cmd = \"true\"\n");
+    let (code, _) = project.combined(&["--definitely-not-a-flag"]);
+    assert_eq!(code, 2, "clap usage errors exit 2");
+
+    let empty = tempfile::tempdir().expect("temp dir");
+    let output = Command::new(bin())
+        .current_dir(empty.path())
+        .args(["ps"])
+        .output()
+        .expect("ps");
+    assert_eq!(output.status.code(), Some(3));
+    let text = String::from_utf8_lossy(&output.stderr);
+    has(&text, "agproc.toml");
+}
