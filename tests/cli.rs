@@ -576,27 +576,92 @@ run-cmd = "sh slow-stop.sh b"
 }
 
 #[test]
-fn logs_replay_the_last_session_and_follow_returns_on_stop() {
+fn the_start_console_still_narrates_every_phase() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "quiet"
+build-cmd = "echo building-quiet"
+run-cmd = "sh -c 'echo serving-quiet; sleep 120'"
+
+[[service]]
+name = "other"
+run-cmd = "sh -c 'echo serving-other; sleep 120'"
+"#,
+    );
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    for marker in [
+        "===== BUILDING =====",
+        "===== BUILD SUCCEED =====",
+        "===== RUNNING =====",
+        "===== PROBE PASSED (NO PROBE CONFIGURED) =====",
+    ] {
+        assert!(has(&text, marker), "missing {marker}");
+    }
+    // Multi-service runs prefix every line, markers included.
+    has(&text, "quiet | ===== BUILDING =====");
+    has(&text, "quiet | building-quiet");
+    has(&text, "other | serving-other");
+    let _ = project.agproc(&["stop"]);
+}
+
+#[test]
+fn logs_shows_only_the_last_run_cmd_output() {
     let project = Project::new(
         r#"
 [[service]]
 name = "ticker"
-run-cmd = "sh -c 'i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.3; done'"
+run-cmd = "sh -c 'i=0; while true; do echo out-$$-$i; echo err-$$-$i >&2; i=$((i+1)); sleep 0.3; done'"
 "#,
     );
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "{text}");
-
-    let (code, text) = project.combined(&["logs", "ticker"]);
-    assert_eq!(code, 0, "{text}");
+    // The console narrates the start…
     has(&text, "===== RUNNING =====");
-    has(&text, "tick-0");
     has(&text, "===== PROBE PASSED");
 
-    let (_, tailed) = project.combined(&["logs", "ticker", "--tail", "1"]);
+    // …while `logs` replays the run-cmd output only.
+    let (code, text) = project.combined(&["logs", "ticker"]);
+    assert_eq!(code, 0, "{text}");
+    let first_run = text
+        .lines()
+        .find_map(|line| line.strip_prefix("out-"))
+        .map(|rest| rest.split('-').next().unwrap_or_default().to_string())
+        .expect("run-cmd output present");
+    has(&text, "out-");
+    has(&text, "err-");
+    assert!(
+        !text.contains("====="),
+        "agproc markers leaked into `logs`:\n{text}"
+    );
+
+    let (_, tailed) = project.combined(&["logs", "ticker", "--stream", "stdout", "--tail", "1"]);
     assert_eq!(tailed.lines().filter(|l| !l.is_empty()).count(), 1, "{tailed}");
 
-    // `-f` must come back by itself once the service is gone.
+    // Stream filtering still works, and the streams stay separate.
+    let output = project.agproc(&["logs", "ticker", "--stream", "stdout"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    has(&stdout, "out-");
+    assert!(!stdout.contains("err-"), "stderr leaked into stdout:\n{stdout}");
+    let output = project.agproc(&["logs", "ticker", "--stream", "stderr"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    has(&stderr, "err-");
+    assert!(!stderr.contains("out-"), "stdout leaked into stderr:\n{stderr}");
+
+    // A restart starts a new run-cmd: the previous one's output is gone.
+    let (code, text) = project.combined(&["restart", "ticker"]);
+    assert_eq!(code, 0, "{text}");
+    let (_, after) = project.combined(&["logs", "ticker"]);
+    has(&after, "out-");
+    assert!(
+        !after.contains(&format!("out-{first_run}-")),
+        "output of the previous run-cmd survived a restart:\n{after}"
+    );
+
+    // `-f` comes back by itself once the service is gone, still replaying the
+    // run-cmd output only.
     let dir = project.path().to_path_buf();
     let handle = std::thread::spawn(move || {
         Command::new(bin())
@@ -608,9 +673,109 @@ run-cmd = "sh -c 'i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.3; done'
     std::thread::sleep(Duration::from_millis(600));
     let _ = project.agproc(&["stop"]);
     let followed = handle.join().expect("follow thread");
-    let text = String::from_utf8_lossy(&followed.stdout).into_owned();
     assert_eq!(followed.status.code(), Some(0));
-    has(&text, "===== STOPPED =====");
+    let text = String::from_utf8_lossy(&followed.stdout).into_owned();
+    has(&text, "out-");
+    assert!(
+        !text.contains("====="),
+        "markers leaked into `logs -f`:\n{text}"
+    );
+}
+
+#[test]
+fn logs_all_is_gone() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "svc"
+run-cmd = "sleep 120"
+"#,
+    );
+    let (code, _) = project.combined(&["logs", "--all"]);
+    assert_eq!(code, 2, "--all must be rejected as an unknown flag");
+}
+
+#[test]
+fn build_output_is_shown_live_and_kept_out_of_the_logs() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "badbuild"
+build-cmd = "echo compile-error; echo compile-error-on-stderr >&2; exit 101"
+run-cmd = "sleep 120"
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 4, "{text}");
+    has(&text, "===== BUILDING =====");
+    has(&text, "compile-error");
+    has(&text, "compile-error-on-stderr");
+    has(&text, "===== BUILD FAILED (exit code 101) =====");
+
+    // Build output never reaches the service logs…
+    let (code, text) = project.combined(&["logs", "badbuild"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "NO LOGS YET");
+    assert!(!text.contains("compile-error"), "{text}");
+
+    // …but the transient console stream keeps it (failure paths are not cleaned
+    // up), so a failed build stays diagnosable.
+    let console = project.read(".agproc/tmp/badbuild.console.stdout");
+    has(&console, "compile-error");
+    let console_err = project.read(".agproc/tmp/badbuild.console.stderr");
+    has(&console_err, "compile-error-on-stderr");
+}
+
+#[test]
+fn the_console_stream_stops_growing_once_readiness_settled() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "ticker"
+run-cmd = "sh -c 'i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.05; done'"
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+
+    // Let the runner notice that readiness settled.
+    std::thread::sleep(Duration::from_millis(400));
+    let console = project.file(".agproc/tmp/ticker.console.stdout");
+    let log = project.file(".agproc/logs/ticker.stdout.log");
+    let size = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let console_before = size(&console);
+    let log_before = size(&log);
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        size(&log) > log_before,
+        "run logs must keep growing while the service runs"
+    );
+    assert_eq!(
+        size(&console),
+        console_before,
+        "the console stream must stop duplicating run output after readiness"
+    );
+    let _ = project.agproc(&["stop"]);
+}
+
+#[test]
+fn every_probe_attempt_is_reported() {
+    let port = free_port();
+    let project = Project::new(&format!(
+        r#"
+[[service]]
+name = "hopeless"
+run-cmd = "sh -c 'echo waiting; sleep 60'"
+probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 3 }}
+"#
+    ));
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 6, "{text}");
+    for attempt in 1..=3 {
+        has(&text, &format!("===== PROBE ATTEMPT {attempt}/3 FAILED"));
+    }
+    assert!(!text.contains("PROBE ATTEMPT 4/3"), "{text}");
+    has(&text, "===== PROBE FAILED: 3 consecutive failures");
 }
 
 #[test]

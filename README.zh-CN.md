@@ -53,7 +53,7 @@ agproc start   [service...] [--timeout-seconds N]   # 未运行则 build + run +
 agproc restart [service...] [--timeout-seconds N]   # 先停，再 build + run + 等就绪
 agproc stop    [service...]                         # 停止运行中的服务，或取消进行中的 build
 agproc ps      [service...] [--json]                # 状态查询
-agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr] [--all]
+agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr]
 agproc skills  [--json]                             # 输出项目专属的 Agent 指引
 agproc init    [--force]                            # 生成模板
 ```
@@ -61,7 +61,7 @@ agproc init    [--force]                            # 生成模板
 - 省略 `[service...]` 表示**全部** service；支持一次写多个名字。
 - `-C/--config <PATH>` 或环境变量 `AGPROC_CONFIG` 指定配置；否则像 git/cargo 一样从当前目录**向上查找** `agproc.toml`，`.agproc/` 建在配置文件同目录。
 - `--timeout-seconds` 只约束**命令等待**：超时打印 `STILL STARTING` 并返回 1，**不会杀掉后台 runner**，可继续用 `ps` / `logs` 观察。
-- `agproc logs` 默认只显示**最近一次 session**（`--all` 看全部历史）；`-f` 会在服务停止后**自动返回**，不会挂住 Agent。
+- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每条流**各取末 N 行；`-f` 会在服务停止后**自动返回**，不会挂住 Agent。
 
 ## 配置文件 `agproc.toml`
 
@@ -122,6 +122,9 @@ agproc 自己的日志统一是 `===== XXX =====`：
 ===== WARNING: PORT 3000 ALREADY IN USE BY pid 614089 (node) =====
 ```
 
+**这些行出现的位置**：`start` / `restart`（以及 `stop`）的控制台，**不写入服务日志文件**——
+所以 `agproc logs` 的输出里不会出现它们。
+
 **流分离**：子进程的 stdout 原样进入 agproc 的 stdout，stderr 原样进入 agproc 的 stderr。
 单 service 时不加前缀（可直接管道）；多个 service 时前缀为 `backend | ` 与 `backend stderr | `。
 
@@ -156,12 +159,20 @@ agproc 自己的日志统一是 `===== XXX =====`：
 
 ```
 .agproc/
-├── logs/<service>.stdout.log      # 阶段 marker + 子进程 stdout（按 session 分段）
-├── logs/<service>.stderr.log      # 子进程 stderr
-├── state/<service>.json           # 运行时状态（原子写入，ps/logs 的唯一事实源）
+├── logs/<service>.stdout.log      # 只有 run-cmd 的 stdout（session 开始时截断）
+├── logs/<service>.stderr.log      # 只有 run-cmd 的 stderr
+├── tmp/<service>.console.stdout    # 临时控制台流：marker + build 输出 + 就绪前的 run 输出
+├── tmp/<service>.console.stderr    # 同上 stderr 侧，另含 runner 自身的报错
+├── state/<service>.json           # 运行时状态（原子写入，ps 的唯一事实源）
 ├── lock/<service>.lock            # 编排锁（flock）
 └── tmp/                           # 原子写临时文件
 ```
+
+**run 日志**里只有服务自己打印的内容，这正是 `agproc logs` 精确的原因。agproc 自己的
+`===== ... =====` 行与 build-cmd 的输出改走**控制台流**：它是 `start`/`restart` 实时转发的内容，
+stdout/stderr 分别映射到 agproc 自己的两条流，并且是临时的——下一次 session 会截断它，
+而一个**走到就绪**的 session 结束时会被删除。失败路径会保留它，所以构建失败仍可排查：
+`cat .agproc/tmp/<service>.console.stdout`。
 
 `agproc init` 会把 `.agproc/` 追加进 `.gitignore`。
 

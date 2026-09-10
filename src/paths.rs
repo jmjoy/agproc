@@ -108,6 +108,17 @@ impl Project {
         self.logs_dir().join(format!("{service}.stderr.log"))
     }
 
+    /// Transient console stream of a session: the markers agproc prints, the
+    /// build-cmd output, and run output until readiness settles. `agproc start`
+    /// forwards it live; `agproc logs` never reads it.
+    pub fn console_stdout(&self, service: &str) -> PathBuf {
+        self.tmp_dir().join(format!("{service}.console.stdout"))
+    }
+
+    pub fn console_stderr(&self, service: &str) -> PathBuf {
+        self.tmp_dir().join(format!("{service}.console.stderr"))
+    }
+
     pub fn state_path(&self, service: &str) -> PathBuf {
         self.state_dir().join(format!("{service}.json"))
     }

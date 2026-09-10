@@ -1,9 +1,15 @@
-//! Per-service log files: append, rotate, follow.
+//! Per-service log files: append, truncate, rotate, follow.
 //!
-//! The log files are the single source of truth for what a service printed:
-//! the runner writes them, the CLI tails them for live output, and `agproc logs`
-//! replays them later. stdout and stderr live in separate files so the two
-//! streams can be re-emitted (and filtered) independently.
+//! A service has two destinations, and keeping them apart is the point:
+//!
+//! - the **run logs** under `.agproc/logs/` hold *only* run-cmd output, and are
+//!   truncated when a session starts, so `agproc logs` always replays the last
+//!   run-cmd and nothing else;
+//! - the **console stream** under `.agproc/tmp/` is what `agproc start` and
+//!   `agproc restart` forward live: agproc's own markers and the build-cmd
+//!   output live there, transient by construction.
+//!
+//! Agproc never writes its own lines into the run logs.
 
 use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
@@ -71,37 +77,104 @@ impl LineBuffer {
     }
 }
 
-/// Append-only writer for one service's two log files.
+/// Append-only writer for one service's destinations.
+///
+/// Two destinations exist per service:
+///
+/// - **run logs** (`logs/<svc>.stdout.log`, `logs/<svc>.stderr.log`): what
+///   `agproc logs` replays. They hold run-cmd output only, and are truncated
+///   when a session starts, so they always describe the last run-cmd.
+/// - **console stream** (`tmp/<svc>.console.stdout`, `tmp/<svc>.console.stderr`):
+///   what `agproc start`/`restart` forwards live. It also carries agproc's own
+///   `===== ... =====` markers and the build-cmd output, which are therefore
+///   kept out of the run logs. It lives in `tmp/` because it is transient.
 pub struct LogSink {
-    stdout: SinkFile,
-    stderr: SinkFile,
+    run: LogPair,
+    console: LogPair,
     max_bytes: u64,
+    write_run: bool,
+    write_console: bool,
 }
 
-impl LogSink {
-    pub fn open(project: &Project, service: &str, max_bytes: u64) -> Result<Self> {
+struct LogPair {
+    out: SinkFile,
+    err: SinkFile,
+}
+
+impl LogPair {
+    fn open(out_path: &Path, err_path: &Path) -> Result<Self> {
         Ok(Self {
-            stdout: SinkFile::open(&project.log_stdout(service))?,
-            stderr: SinkFile::open(&project.log_stderr(service))?,
-            max_bytes,
+            out: SinkFile::open(out_path)?,
+            err: SinkFile::open(err_path)?,
         })
     }
 
-    /// Current end offsets, recorded as the start of this session.
-    pub fn offsets(&self) -> (u64, u64) {
-        (self.stdout.len, self.stderr.len)
+    fn truncate(&mut self) -> Result<()> {
+        self.out.truncate()?;
+        self.err.truncate()
+    }
+}
+
+impl LogSink {
+    /// Open both destinations and truncate them: a session always starts with
+    /// empty logs, so nothing from a previous session can be mistaken for the
+    /// current one.
+    pub fn open(project: &Project, service: &str, max_bytes: u64) -> Result<Self> {
+        let mut run = LogPair::open(&project.log_stdout(service), &project.log_stderr(service))?;
+        let mut console =
+            LogPair::open(&project.console_stdout(service), &project.console_stderr(service))?;
+        run.truncate()?;
+        console.truncate()?;
+        Ok(Self {
+            run,
+            console,
+            max_bytes,
+            // The build phase writes to the console only: build output is not
+            // part of the service's logs.
+            write_run: false,
+            write_console: true,
+        })
+    }
+
+    /// The run-cmd is about to start: truncate the run logs and begin writing
+    /// to them (that is what makes them "the last run-cmd's logs").
+    pub fn begin_run(&mut self) -> Result<()> {
+        self.run.truncate()?;
+        self.write_run = true;
+        Ok(())
+    }
+
+    /// Readiness has settled, so the CLI has stopped watching: stop duplicating
+    /// run output into the console stream, which would otherwise grow for the
+    /// whole lifetime of a long-running service. Markers keep being written.
+    pub fn end_narrative(&mut self) {
+        self.write_console = false;
     }
 
     pub fn marker(&mut self, text: &str) -> Result<()> {
-        self.stdout.write(marker_line(text).as_bytes(), self.max_bytes)
+        self.console
+            .out
+            .write(marker_line(text).as_bytes(), self.max_bytes)
     }
 
     pub fn write_stdout(&mut self, bytes: &[u8]) -> Result<()> {
-        self.stdout.write(bytes, self.max_bytes)
+        if self.write_run {
+            self.run.out.write(bytes, self.max_bytes)?;
+        }
+        if self.write_console {
+            self.console.out.write(bytes, self.max_bytes)?;
+        }
+        Ok(())
     }
 
     pub fn write_stderr(&mut self, bytes: &[u8]) -> Result<()> {
-        self.stderr.write(bytes, self.max_bytes)
+        if self.write_run {
+            self.run.err.write(bytes, self.max_bytes)?;
+        }
+        if self.write_console {
+            self.console.err.write(bytes, self.max_bytes)?;
+        }
+        Ok(())
     }
 }
 
@@ -139,6 +212,16 @@ impl SinkFile {
             .with_context(|| format!("cannot write {}", self.path.display()))?;
         self.file.flush().ok();
         self.len += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Empty the file in place (used at the start of a session, so a previous
+    /// session's output can never be read as the current one).
+    fn truncate(&mut self) -> Result<()> {
+        self.file
+            .set_len(0)
+            .with_context(|| format!("cannot truncate {}", self.path.display()))?;
+        self.len = 0;
         Ok(())
     }
 
@@ -216,10 +299,14 @@ impl LogFollower {
         let meta = match std::fs::metadata(&self.path) {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // The file is gone (a finished session cleans its console stream
+                // up). Anything already buffered in our open handle is still
+                // readable, so hand that over before letting go.
+                let tail = self.drain_open_handle();
                 self.file = None;
                 self.inode = 0;
                 self.offset = 0;
-                return Ok(Vec::new());
+                return tail;
             }
             Err(err) => {
                 return Err(err).with_context(|| format!("cannot stat {}", self.path.display()));
@@ -255,6 +342,30 @@ impl LogFollower {
                         .with_context(|| format!("cannot read {}", self.path.display()));
                 }
             }
+        };
+        buf.truncate(read);
+        self.offset += read as u64;
+        Ok(buf)
+    }
+
+    /// Read whatever is left in an already-open handle, for the case where the
+    /// path disappeared underneath us (unlinked file).
+    fn drain_open_handle(&mut self) -> Result<Vec<u8>> {
+        let Some(file) = self.file.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let len = match file.metadata() {
+            Ok(meta) => meta.len(),
+            Err(_) => return Ok(Vec::new()),
+        };
+        if len <= self.offset {
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; (len - self.offset) as usize];
+        let read = match file.read_at(&mut buf, self.offset) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => 0,
+            Err(_) => 0,
         };
         buf.truncate(read);
         self.offset += read as u64;
@@ -374,26 +485,123 @@ mod tests {
     }
 
     #[test]
-    fn sink_writes_markers_and_rotates() {
+    fn sink_keeps_markers_and_build_output_out_of_the_run_logs() {
         let dir = tempfile::tempdir().unwrap();
         let project = crate::paths::Project {
             root: dir.path().to_path_buf(),
             config_path: dir.path().join("agproc.toml"),
         };
-        let mut sink = LogSink::open(&project, "svc", 32).unwrap();
-        sink.marker("BUILDING").unwrap();
-        sink.write_stdout(b"hello\n").unwrap();
-        assert_eq!(sink.offsets().0, "===== BUILDING =====\nhello\n".len() as u64);
+        let mut sink = LogSink::open(&project, "svc", 0).unwrap();
 
-        // Crossing the cap rotates the file and starts a new one.
+        // Build phase: markers and build output go to the console stream only.
+        sink.marker("BUILDING").unwrap();
+        sink.write_stdout(b"compiling\n").unwrap();
+        sink.write_stderr(b"warning: unused import\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.console_stdout("svc")).unwrap(),
+            "===== BUILDING =====\ncompiling\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.console_stderr("svc")).unwrap(),
+            "warning: unused import\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.log_stdout("svc")).unwrap(),
+            ""
+        );
+
+        // Run phase: run output lands in both destinations until readiness
+        // settles, then only in the run logs.
+        sink.begin_run().unwrap();
+        sink.marker("RUNNING").unwrap();
+        sink.write_stdout(b"listening\n").unwrap();
+        sink.write_stderr(b"note\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.log_stdout("svc")).unwrap(),
+            "listening\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.log_stderr("svc")).unwrap(),
+            "note\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.console_stdout("svc")).unwrap(),
+            "===== BUILDING =====\ncompiling\n===== RUNNING =====\nlistening\n"
+        );
+
+        sink.end_narrative();
+        sink.marker("SERVICE EXITED (exit code 0)").unwrap();
+        sink.write_stdout(b"later\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.log_stdout("svc")).unwrap(),
+            "listening\nlater\n"
+        );
+        assert!(
+            !std::fs::read_to_string(project.console_stdout("svc"))
+                .unwrap()
+                .contains("later"),
+            "run output must stop being duplicated once readiness settled"
+        );
+    }
+
+    #[test]
+    fn a_new_session_starts_from_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = crate::paths::Project {
+            root: dir.path().to_path_buf(),
+            config_path: dir.path().join("agproc.toml"),
+        };
+        {
+            let mut sink = LogSink::open(&project, "svc", 0).unwrap();
+            sink.marker("BUILDING").unwrap();
+            sink.begin_run().unwrap();
+            sink.write_stdout(b"previous run\n").unwrap();
+        }
+        let mut sink = LogSink::open(&project, "svc", 0).unwrap();
+        sink.begin_run().unwrap();
+        sink.write_stdout(b"current run\n").unwrap();
+
+        let logs = std::fs::read_to_string(project.log_stdout("svc")).unwrap();
+        assert_eq!(logs, "current run\n");
+        let console = std::fs::read_to_string(project.console_stdout("svc")).unwrap();
+        assert_eq!(console, "current run\n");
+    }
+
+    #[test]
+    fn sink_rotates_when_the_cap_is_crossed() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = crate::paths::Project {
+            root: dir.path().to_path_buf(),
+            config_path: dir.path().join("agproc.toml"),
+        };
+        let mut sink = LogSink::open(&project, "svc", 16).unwrap();
+        sink.begin_run().unwrap();
         sink.write_stdout(b"0123456789\n").unwrap();
+        sink.write_stdout(b"abcdefghij\n").unwrap();
+
         let rotated = dir.path().join(".agproc/logs/svc.stdout.log.1");
         assert!(rotated.exists());
         let current = std::fs::read_to_string(project.log_stdout("svc")).unwrap();
-        assert_eq!(current, "0123456789\n");
+        assert_eq!(current, "abcdefghij\n");
+    }
 
-        sink.write_stderr(b"boom\n").unwrap();
-        let err = std::fs::read_to_string(project.log_stderr("svc")).unwrap();
-        assert_eq!(err, "boom\n");
+    #[test]
+    fn follower_hands_over_bytes_of_an_unlinked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.log");
+        std::fs::write(&path, b"first\n").unwrap();
+
+        let mut follower = LogFollower::new(path.clone());
+        follower.seek_to(0).unwrap();
+        assert_eq!(follower.read_new().unwrap(), b"first\n");
+
+        // More output is written and then the file is removed underneath us.
+        {
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"last words\n").unwrap();
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(follower.read_new().unwrap(), b"last words\n");
+        assert!(follower.read_new().unwrap().is_empty());
     }
 }

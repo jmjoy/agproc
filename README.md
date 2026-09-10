@@ -53,7 +53,7 @@ agproc start   [service...] [--timeout-seconds N]   # build + run + wait for the
 agproc restart [service...] [--timeout-seconds N]   # stop first, then build + run + wait for the probe
 agproc stop    [service...]                         # stop a running service or cancel a build in progress
 agproc ps      [service...] [--json]                # what is running
-agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr] [--all]
+agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr]
 agproc skills  [--json]                             # the project-aware guide for agents
 agproc init    [--force]                            # write a config template
 ```
@@ -64,8 +64,9 @@ agproc init    [--force]                            # write a config template
   next to it.
 - `--timeout-seconds` bounds **the command's wait only**: on timeout it prints `STILL STARTING` and
   exits 1, but the **background runner keeps working** — keep tracking it with `ps` / `logs`.
-- `agproc logs` shows only the **most recent session** unless `--all` is given, and `-f` **returns by
-  itself** once the service stops, so it never hangs an agent.
+- `agproc logs` replays the **last run-cmd's** stdout/stderr and nothing else: no agproc markers, no
+  build output, no earlier runs. `--tail N` keeps the last N lines of **each** stream, and `-f`
+  **returns by itself** once the service stops, so it never hangs an agent.
 
 ## Configuration: `agproc.toml`
 
@@ -128,6 +129,9 @@ Everything agproc says itself looks like `===== LIKE THIS =====`:
 ===== WARNING: PORT 3000 ALREADY IN USE BY pid 614089 (node) =====
 ```
 
+**Where these lines live**: on the console of `start` / `restart` (and of `stop`), never in the
+service's log files — `agproc logs` is free of them.
+
 **Streams stay separate**: a child's stdout goes to agproc's stdout and its stderr to agproc's
 stderr, unchanged. A single service gets no prefix (so it can be piped); with several services the
 prefixes are `backend | ` and `backend stderr | `.
@@ -165,12 +169,21 @@ prefixes are `backend | ` and `backend stderr | `.
 
 ```
 .agproc/
-├── logs/<service>.stdout.log      # phase markers + child stdout (split by session)
-├── logs/<service>.stderr.log      # child stderr
-├── state/<service>.json           # runtime state (atomic writes; the source of truth for ps/logs)
+├── logs/<service>.stdout.log      # run-cmd stdout only (truncated when a session starts)
+├── logs/<service>.stderr.log      # run-cmd stderr only
+├── tmp/<service>.console.stdout   # transient console stream: markers + build output + startup output
+├── tmp/<service>.console.stderr   # same for stderr, plus the runner's own errors
+├── state/<service>.json           # runtime state (atomic writes; the source of truth for ps)
 ├── lock/<service>.lock            # orchestration lock (flock)
 └── tmp/                           # temp files for atomic writes
 ```
+
+The **run logs** hold what the service printed and nothing else, which is why `agproc logs` is
+precise. Agproc's own `===== ... =====` lines and the build-cmd output go to the **console stream**
+instead: it is what `start`/`restart` forward live, its stdout/stderr split mirrored onto agproc's
+own, and it is transient — truncated by the next session, and removed once a session that reached
+readiness ends. Failure paths keep it, so a failed build stays diagnosable:
+`cat .agproc/tmp/<service>.console.stdout`.
 
 `agproc init` appends `.agproc/` to `.gitignore`.
 

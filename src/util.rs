@@ -84,8 +84,3 @@ pub fn write_atomic(path: &Path, tmp_dir: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("cannot publish {}", path.display()))?;
     Ok(())
 }
-
-/// Size of a file in bytes, or 0 when it does not exist.
-pub fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}

@@ -19,7 +19,7 @@ use crate::paths::Project;
 use crate::proc;
 use crate::procinfo;
 use crate::state::{self, Phase, State};
-use crate::util::{file_len, format_duration_ms};
+use crate::util::format_duration_ms;
 
 pub struct Request {
     pub services: Vec<String>,
@@ -230,8 +230,6 @@ fn start_one(
     }
 
     let generation = current.as_ref().map(|s| s.generation).unwrap_or(0) + 1;
-    let out_offset = file_len(&project.log_stdout(name));
-    let err_offset = file_len(&project.log_stderr(name));
 
     let exe = std::env::current_exe().map_err(|err| {
         Failed::new(
@@ -248,19 +246,25 @@ fn start_one(
         "--generation".to_string(),
         generation.to_string(),
     ];
-    let runner_pid = proc::spawn_detached(&exe, &args, Some(&project.log_stderr(name)))
+    // The runner's own stderr joins the console stream, so a failure to start
+    // is visible to whoever is watching.
+    let runner_pid = proc::spawn_detached(&exe, &args, Some(&project.console_stderr(name)))
         .map_err(Failed::from)?;
 
+    // Follow the console stream: markers, build output and (until readiness)
+    // run output. The runner truncates it before publishing its state, so we
+    // wait for our generation and only then start reading from the beginning.
     let mut relay = LogRelay::new(
-        project.log_stdout(name),
-        project.log_stderr(name),
+        project.console_stdout(name),
+        project.console_stderr(name),
         prefix.out.clone(),
         prefix.err.clone(),
     );
-    relay.seek(out_offset, err_offset).map_err(Failed::from)?;
 
     let started = Instant::now();
-    // Give the runner a moment to publish its first state record.
+    // Give the runner a moment to publish its first state record (it truncates
+    // the console stream before publishing, so reading from 0 cannot pick up a
+    // previous session's bytes).
     let publish_deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < publish_deadline {
         if let Some(state) = state::load(&state_path).state
@@ -274,6 +278,9 @@ fn start_one(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Even when the runner never published (it failed to start), its stderr went
+    // to the console stream: read it so the failure is visible.
+    relay.seek(0, 0).map_err(Failed::from)?;
 
     loop {
         relay.pump().map_err(Failed::from)?;

@@ -13,8 +13,9 @@ process's state and logs under `.agproc/`, so calling it repeatedly is safe.
 3. **After changing code, restart the service**: `agproc restart <service>`. That is the
    intended loop — edit, restart, read logs. `start` never re-runs an already-running service.
 4. **Trust the exit code, not the prose.** Every failure has a distinct exit code (below).
-5. **The log files are the source of truth.** `agproc logs <service>` replays the last
-   session; the files are `.agproc/logs/<service>.stdout.log` and `.agproc/logs/<service>.stderr.log`.
+5. **`agproc logs` is the service's output and nothing else.** It replays the last run-cmd's
+   stdout/stderr (`.agproc/logs/<service>.stdout.log` and `.stderr.log`) — no agproc markers, no
+   build output, no earlier runs. What you saw on the console of `start` is not repeated there.
 
 ## The intended agent loop
 
@@ -49,7 +50,7 @@ line with the service name (`backend | ...`); with a single service there is no 
 | `agproc restart [service...]` | stop, then build + run + wait for the probe |
 | `agproc stop [service...]` | stop a running service or cancel a build that is in progress |
 | `agproc ps [service...] [--json]` | what is running, with phase, pid, uptime and reason |
-| `agproc logs [service...] [--tail N] [-f] [--stream both\|stdout\|stderr] [--all]` | replay or follow logs |
+| `agproc logs [service...] [--tail N] [-f] [--stream both\|stdout\|stderr]` | replay or follow the last run-cmd's output |
 | `agproc skills` | this document, specialised for this project |
 | `agproc init [--force]` | write an `agproc.toml` template |
 
@@ -58,8 +59,10 @@ Flags worth knowing:
 - `agproc start --timeout-seconds N` bounds how long the *command* waits. On timeout it
   prints `STILL STARTING` and exits 1, but the service keeps building/running in the
   background — check `agproc ps` instead of starting a second one.
-- `agproc logs` shows only the **most recent session** by default; `--all` shows the whole
-  history. `-f` returns as soon as the service stops, so it never hangs.
+- `agproc logs` replays the **last run-cmd's** output only, with `--tail N` keeping the last N lines
+  of each stream. `-f` returns as soon as the service stops, so it never hangs.
+- Build output is shown live by `start`/`restart` but is not kept in the service logs. After a failed
+  build, read it back from `.agproc/tmp/<service>.console.stdout` (the transient console stream).
 - stdout goes to agproc's stdout and stderr to agproc's stderr; with several services the
   prefixes are `name | ` and `name stderr | `.
 

@@ -85,7 +85,7 @@ pub struct LogsArgs {
     #[arg(value_name = "SERVICE")]
     pub services: Vec<String>,
 
-    /// Only the last N lines of the selected window
+    /// Only the last N lines of each stream
     #[arg(long, value_name = "N")]
     pub tail: Option<usize>,
 
@@ -96,10 +96,6 @@ pub struct LogsArgs {
     /// Which stream to show
     #[arg(long, value_enum, default_value_t = StreamArg::Both)]
     pub stream: StreamArg,
-
-    /// Show every session, not just the most recent one
-    #[arg(long)]
-    pub all: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,7 +279,6 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
                         StreamArg::Stdout => logs::Stream::Stdout,
                         StreamArg::Stderr => logs::Stream::Stderr,
                     },
-                    all: args.all,
                 },
             )
         }

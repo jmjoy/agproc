@@ -96,12 +96,6 @@ impl Phase {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Offsets {
-    pub stdout: u64,
-    pub stderr: u64,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProbeState {
@@ -126,7 +120,6 @@ pub struct State {
     pub child_pgid: Option<i32>,
     pub child_kind: Option<String>,
     pub session_started_at: i64,
-    pub session_start_offset: Offsets,
     pub build_started_at: Option<i64>,
     pub build_finished_at: Option<i64>,
     pub build_exit_code: Option<i32>,
@@ -154,7 +147,6 @@ impl State {
             child_pgid: None,
             child_kind: None,
             session_started_at: now_unix_ms(),
-            session_start_offset: Offsets::default(),
             build_started_at: None,
             build_finished_at: None,
             build_exit_code: None,

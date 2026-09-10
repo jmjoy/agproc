@@ -1,8 +1,9 @@
-//! `agproc logs` — replay and follow the logs of a service.
+//! `agproc logs` — replay and follow the output of a service's run-cmd.
 //!
-//! By default only the most recent session (the block since the last `start`)
-//! is shown, which is what both a human and an agent want after a restart. The
-//! two streams are replayed independently and keep their original destinations.
+//! The run logs are truncated when a session starts, so the whole file is
+//! exactly the last run-cmd's output: no agproc markers, no build output, no
+//! earlier sessions. The two streams are replayed independently and keep their
+//! original destinations.
 
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +29,6 @@ pub struct Request {
     pub tail: Option<usize>,
     pub follow: bool,
     pub stream: Stream,
-    pub all: bool,
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -66,20 +66,15 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
     let mut printed_anything = false;
     for service in &services {
         let prefix = Prefix::service(&service.name, multi);
-        let start = if request.all {
-            (0, 0)
-        } else {
-            session_start(project, &service.name)
-        };
         let mut chunks: Vec<(bool, Vec<u8>)> = Vec::new();
         if matches!(request.stream, Stream::Both | Stream::Stdout) {
             let mut follower = LogFollower::new(project.log_stdout(&service.name));
-            follower.seek_to(start.0).map_err(Failure::from)?;
+            follower.seek_to(0).map_err(Failure::from)?;
             chunks.push((false, follower.read_new().map_err(Failure::from)?));
         }
         if matches!(request.stream, Stream::Both | Stream::Stderr) {
             let mut follower = LogFollower::new(project.log_stderr(&service.name));
-            follower.seek_to(start.1).map_err(Failure::from)?;
+            follower.seek_to(0).map_err(Failure::from)?;
             chunks.push((true, follower.read_new().map_err(Failure::from)?));
         }
 
@@ -116,17 +111,6 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
     Ok(exit::OK)
 }
 
-/// Byte offsets of the beginning of the last session, per stream.
-fn session_start(project: &Project, service: &str) -> (u64, u64) {
-    match state::load(&project.state_path(service)).state {
-        Some(state) => (
-            state.session_start_offset.stdout,
-            state.session_start_offset.stderr,
-        ),
-        None => (0, 0),
-    }
-}
-
 fn follow(
     project: &Project,
     services: &[&crate::config::Service],
@@ -136,11 +120,6 @@ fn follow(
     let mut relays: Vec<(String, LogRelay)> = Vec::new();
     for service in services {
         let prefix = Prefix::service(&service.name, multi);
-        let start = if request.all {
-            (0, 0)
-        } else {
-            session_start(project, &service.name)
-        };
         let mut relay = LogRelay::new(
             project.log_stdout(&service.name),
             project.log_stderr(&service.name),
@@ -151,7 +130,7 @@ fn follow(
             !matches!(request.stream, Stream::Stderr),
             !matches!(request.stream, Stream::Stdout),
         );
-        relay.seek(start.0, start.1).map_err(Failure::from)?;
+        relay.seek(0, 0).map_err(Failure::from)?;
         relays.push((service.name.clone(), relay));
     }
 

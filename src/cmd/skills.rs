@@ -145,7 +145,7 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
     ));
     out.push_str(&format!("- agproc: `{}`\n\n", env!("CARGO_PKG_VERSION")));
 
-    out.push_str("| service | build-cmd | run-cmd | probe | logs |\n");
+    out.push_str("| service | build-cmd | run-cmd | probe | run-cmd logs |\n");
     out.push_str("|---|---|---|---|---|\n");
     for service in &loaded.config.services {
         let build = service

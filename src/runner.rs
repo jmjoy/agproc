@@ -23,8 +23,8 @@ use crate::logstore::LogSink;
 use crate::paths::Project;
 use crate::port::{self, Ownership};
 use crate::proc::{self, ChildWatch, Pty, ReadOutcome, SpawnSpec};
-use crate::state::{self, Offsets, Phase, State};
-use crate::util::{format_duration_ms, iso8601_local, now_unix_ms};
+use crate::state::{self, Phase, State};
+use crate::util::{format_duration_ms, now_unix_ms};
 use crate::{exit, procinfo};
 
 pub struct Args {
@@ -102,13 +102,21 @@ impl Session {
         self.publish()?;
         Ok(phase.start_exit_code())
     }
+
+    /// Remove the transient console stream of a session that has been fully
+    /// forwarded (see the caller: only the "reached readiness" path does this).
+    fn drop_console_stream(&self) {
+        let _ = std::fs::remove_file(self.project.console_stdout(&self.service.name));
+        let _ = std::fs::remove_file(self.project.console_stderr(&self.service.name));
+    }
 }
 
 pub fn run(args: Args) -> i32 {
     match inner(args) {
         Ok(code) => code,
         Err(err) => {
-            // The CLI tails the service's stderr log, where our stderr lands.
+            // Our stderr is pointed at the service's console stream, which the
+            // CLI forwards: a failure to even start shows up there.
             eprintln!("===== RUNNER ERROR =====");
             eprintln!("{err:#}");
             exit::GENERIC
@@ -145,11 +153,6 @@ fn inner(args: Args) -> Result<i32> {
     let sink = LogSink::open(&project, &service.name, settings.log_max_bytes)?;
     let target = service.target();
     let mut state = State::new(&service.name, args.generation, &loaded.hash);
-    let offsets = sink.offsets();
-    state.session_start_offset = Offsets {
-        stdout: offsets.0,
-        stderr: offsets.1,
-    };
     state.probe.kind = target.kind_str().to_string();
     state.probe.target = target.describe();
     state.runner_pid = std::process::id();
@@ -167,10 +170,6 @@ fn inner(args: Args) -> Result<i32> {
         sink,
         state,
     };
-    session.marker(&format!(
-        "SESSION {}",
-        iso8601_local(session.state.session_started_at)
-    ))?;
     session.state.phase = if session.service.build_cmd.is_some() {
         Phase::Building
     } else {
@@ -258,6 +257,9 @@ fn inner(args: Args) -> Result<i32> {
     session.state.child_kind = Some("run".to_string());
     session.marker("RUNNING")?;
     session.publish()?;
+    // From here on the run logs are live: they were truncated when the session
+    // started and hold run-cmd output only.
+    session.sink.begin_run()?;
 
     let argv = session.service.run_cmd.argv(&shell);
     let mut running = match Running::start(&argv, &cwd, &env) {
@@ -362,24 +364,35 @@ fn inner(args: Args) -> Result<i32> {
 
     // ------------------------------------------------------- wait after ready
     let started = Instant::now();
+    // Readiness settled, so the CLI has stopped forwarding: run output no longer
+    // needs duplicating into the console stream (markers still go there).
+    session.sink.end_narrative();
     let outcome = running.supervise(&mut session.sink, None, None, &TERMINATE)?;
     running.terminate(stop_timeout)?;
     session.state.run_finished_at = Some(now_unix_ms());
     let uptime = format_duration_ms(started.elapsed().as_millis() as i64);
 
-    match outcome {
+    let result = match outcome {
         Outcome::Exited(code) => {
             session.state.run_exit_code = Some(code);
             if session.stop_requested() {
-                return session.finish(Phase::Stopped, "STOPPED");
+                session.finish(Phase::Stopped, "STOPPED")
+            } else {
+                session.finish(
+                    Phase::Exited,
+                    &format!("SERVICE EXITED (exit code {code}, ready for {uptime})"),
+                )
             }
-            session.finish(Phase::Exited, &format!("SERVICE EXITED (exit code {code}, ready for {uptime})"))
         }
         Outcome::Terminated => {
             if session.stop_requested() {
-                return session.finish(Phase::Stopped, "STOPPED");
+                session.finish(Phase::Stopped, "STOPPED")
+            } else {
+                session.finish(
+                    Phase::Exited,
+                    &format!("SERVICE EXITED (terminated, ready for {uptime})"),
+                )
             }
-            session.finish(Phase::Exited, &format!("SERVICE EXITED (terminated, ready for {uptime})"))
         }
         other => {
             running.terminate(stop_timeout)?;
@@ -388,7 +401,12 @@ fn inner(args: Args) -> Result<i32> {
                 &format!("SERVICE EXITED ({other:?}, ready for {uptime})"),
             )
         }
-    }
+    };
+    // A session that reached readiness has been fully forwarded already; drop
+    // the transient console stream. Failure paths keep theirs so the output that
+    // explains the failure stays readable.
+    session.drop_console_stream();
+    result
 }
 
 /// A child that is running (or has just finished) inside its own process group.
