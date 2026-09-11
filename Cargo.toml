@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 authors = ["jmjoy <jmjoy@apache.org>"]
-description = "Dev-time process manager for AI agents and humans: build, run and readiness-probe your services from one agproc.toml"
+description = "Dev-time process manager for AI agents and humans: build, run and probe your services from one agproc.toml"
 repository = "https://github.com/jmjoy/agproc"
 readme = "README.md"
 license = "MulanPSL-2.0"
-keywords = ["process-manager", "dev-server", "ai-agent", "supervisor", "readiness-probe"]
+keywords = ["process-manager", "dev-server", "ai-agent", "supervisor"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["examples/", ".agproc"]
 

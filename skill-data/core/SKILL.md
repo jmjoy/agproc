@@ -46,7 +46,7 @@ line with the service name, padded to the longest one so the `|` columns line up
 ## Commands
 
 | Command | What it does |
-|---|---|
+| --- | --- |
 | `agproc start [service...]` | build (if any) + run + wait for the probe. No-op when already running |
 | `agproc restart [service...]` | stop, then build + run + wait for the probe |
 | `agproc stop [service...]` | stop a running service or cancel a build that is in progress |
@@ -65,13 +65,13 @@ Flags worth knowing:
 - Build output is shown live by `start`/`restart` but is not kept in the service logs. After a failed
   build, read it back from `.agproc/tmp/<service>.console.stdout` (the transient console stream).
 - stdout goes to agproc's stdout and stderr to agproc's stderr; with several services every line
-  gets a `name | ` prefix (name padded to the longest one). Both streams share that prefix, so read
+  gets a `name |` prefix (name padded to the longest one). Both streams share that prefix, so read
   the stream — not the text — to tell them apart.
 
 ## Exit codes
 
 | Code | Meaning |
-|---|---|
+| --- | --- |
 | 0 | success: ready / already running / stopped / ps / logs / skills |
 | 1 | generic error, including "the CLI gave up waiting" |
 | 2 | usage error |
@@ -86,7 +86,7 @@ Flags worth knowing:
 
 agproc's own lines always look like `===== LIKE THIS =====`:
 
-```
+```text
 ===== BUILDING =====              build-cmd started
 ===== BUILD SUCCEED =====         build-cmd exited 0
 ===== BUILD FAILED (exit code N) =====

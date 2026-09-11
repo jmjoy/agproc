@@ -2,11 +2,13 @@
 
 **简体中文** | [English](README.md)
 
-> 给 AI Agent 和人同时使用的**开发时进程管理器**（目前仅支持 Linux）
+> 面向 AI 智能体与开发人员的**开发时进程管理器**
+>
+> *（目前仅支持 Linux）*
 
 把项目的常驻服务（后端 / 前端 / worker）写进 `agproc.toml`，agproc 负责
 **build → run → 探针**，并把进程状态与日志落在 `.agproc/`，
-于是「反复调用」对人类和 Agent 都是安全的。
+于是「反复调用」对开发人员和 AI 智能体都是安全的。
 
 ```bash
 agproc start              # 并行启动所有 service，等待就绪
@@ -19,9 +21,9 @@ agproc stop               # 全部停掉
 ## 为什么需要它
 
 | 问题 | agproc 的做法 |
-|---|---|
-| Agent 改代码频繁，反复触发构建/重启，甚至起出第二个 dev server | `start` 是**幂等**的：服务已在跑时只打印 `ALREADY RUNNING` 并返回 0，不 build、不重启。配合 `run-cmd` 使用**非 watch** 服务（如 `vite preview`），改完代码显式 `restart`，每次行为都可预期 |
-| Rust 项目要先编译再运行，失败信息散落 | `build-cmd` + `run-cmd` 分离，编译失败有专属 marker 与**退出码 4**，Agent 无需解析文本 |
+| --- | --- |
+| 对于 `npm run dev` 这类带监听文件修改的 dev server 来说，AI 智能体频繁修改代码会反复触发构建/重启，甚至起出第二个 dev server | `start` 是**幂等**的：服务已在跑时只打印 `ALREADY RUNNING` 并返回 0，不 build、不重启。配合 `run-cmd` 使用**非 watch** 服务（如 `vite preview`），改完代码显式 `restart`，每次行为都可预期 |
+| 对于不带 watch 的 dev server 来说，需要有一种手段能便捷地跑“重新编译 + 运行”流程，而且对开发人员和 AI 智能体来说都保证只有一个服务进程在运行 | `build-cmd` + `run-cmd` 分离并统一编排，构建失败有专属 marker 与**退出码 4**，AI 智能体无需解析文本；内置编排锁与生命周期管理，确保任何时候严格只有一个服务实例在运行，改完代码通过 `restart` 即可安全重跑 |
 | 只按「进程还在」判断就绪，误报很多 | 内置 `http-get` / `tcp-connect` 探针，重试到 `failure-threshold` 才判定失败（**退出码 6**） |
 | 端口被残留进程占着，探针"对着别人的进程"通过 | 端口预检告警 + 就绪瞬间的**归属校验** + 子进程退出事件优先，三重机制，绝不谎报成功 |
 | 日志被管道块缓冲，就绪前的关键输出看不到 | 每个 stream 一个 PTY，子进程保持**行缓冲**，输出实时可见 |
@@ -33,8 +35,6 @@ cargo install agproc          # 从 crates.io 安装（需要 Rust 1.89+）
 
 # 或从源码安装
 cargo install --path .
-# 或只构建二进制
-cargo build --release && install -m755 target/release/agproc ~/.local/bin/
 ```
 
 ## 快速开始
@@ -46,22 +46,38 @@ $EDITOR agproc.toml    # 填 build-cmd / run-cmd / probe
 agproc start           # 启动全部并等待就绪
 ```
 
+## 给 AI 智能体使用
+
+仓库内自带一份与 [skills.sh](https://www.skills.sh/) 兼容的 Skill：
+
+```bash
+npx skills add jmjoy/agproc      # 安装 skills/agproc/SKILL.md（发现用 stub）
+agproc skills                    # 输出完整指引 + 本项目的真实 service 表
+agproc skills --json             # 同上，附结构化数据
+```
+
+`agproc skills --json` 里每个 service 的 `build_cmd` / `run_cmd` 是真正的 **argv 数组**
+（`["pnpm", "dev:serve"]`），与配置写法一致。
+
+Skill 的核心纪律：**项目根存在 `agproc.toml` 时，不要直接用 `pnpm dev` / `cargo run` 起服务**，
+先 `agproc skills` 取指引，再用 agproc 管理进程；改完代码用 `restart`，失败先看退出码再看日志。
+
 ## 命令
 
-```
+```text
 agproc start   [service...] [--timeout-seconds N]   # 未运行则 build + run + 等就绪；已在跑则 no-op
 agproc restart [service...] [--timeout-seconds N]   # 先停，再 build + run + 等就绪
 agproc stop    [service...]                         # 停止运行中的服务，或取消进行中的 build
 agproc ps      [service...] [--json]                # 状态查询
 agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr]
-agproc skills  [--json]                             # 输出项目专属的 Agent 指引
+agproc skills  [--json]                             # 输出项目专属的 AI 智能体指引
 agproc init    [--force]                            # 生成模板
 ```
 
 - 省略 `[service...]` 表示**全部** service；支持一次写多个名字。
 - `-C/--config <PATH>` 或环境变量 `AGPROC_CONFIG` 指定配置；否则像 git/cargo 一样从当前目录**向上查找** `agproc.toml`，`.agproc/` 建在配置文件同目录。
 - `--timeout-seconds` 只约束**命令等待**：超时打印 `STILL STARTING` 并返回 1，**不会杀掉后台 runner**，可继续用 `ps` / `logs` 观察。
-- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每条流**各取末 N 行；`-f` 会在服务停止后**自动返回**，不会挂住 Agent。
+- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每条流**各取末 N 行；`-f` 会在服务停止后**自动返回**，不会挂住 AI 智能体。
 
 ## 配置文件 `agproc.toml`
 
@@ -99,7 +115,7 @@ probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
 
 规则：
 
-- 字面量一律 kebab-case；**未知字段直接报错**（配置往往由 Agent 编写，写错键名必须立刻失败）。
+- 字面量一律 kebab-case；**未知字段直接报错**（配置往往由 AI 智能体编写，写错键名必须立刻失败）。
 - `build-cmd` / `run-cmd` 是 **argv 数组、直接 exec**，中间没有 shell：第一个元素是程序，其余是参数
   （所以 `"cargo build"` 不是命令，要写 `["cargo", "build"]`）。需要 shell 语法（`|`、`&&`、`>`、
   通配符、`$VAR`）时显式写 `run-cmd = ["sh", "-c", "a | b"]`。旧的字符串形式（会执行
@@ -112,16 +128,18 @@ probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
 
 agproc 自己的日志统一是 `===== XXX =====`：
 
-```
+```text
 ===== BUILDING =====
-===== BUILD SUCCEED =====            —— 失败则是 ===== BUILD FAILED (exit code 101) =====
+===== BUILD SUCCEED =====
+===== BUILD FAILED (exit code 101) =====
 ===== RUNNING =====
 ===== PROBE ATTEMPT 2/3 FAILED: connection refused (http://127.0.0.1:3000/healthz) =====
 ===== PROBE PASSED (attempt 2) =====
 ===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code 1) =====
 ===== SERVICE EXITED (exit code 0, ready for 12s) =====
-===== STOPPED ===== / ===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
+===== STOPPED =====
+===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
 ===== START IN PROGRESS (pid 1234, phase building) =====
 ===== WARNING: PORT 3000 ALREADY IN USE BY pid 614089 (node) =====
 ```
@@ -133,12 +151,10 @@ agproc 自己的日志统一是 `===== XXX =====`：
 单 service 时不加前缀（可直接管道）；多个 service 时每行都带服务名前缀，名字按**最长**的那个补齐
 空格，让 `|` 列对齐：
 
-```
+```text
 backend  | ===== RUNNING =====          # `backend` 补齐到 `frontend` 的宽度
 frontend | ===== PROBE PASSED =====
 ```
-
-stdout 与 stderr 用的是**同一个前缀**——两条流靠去向区分，stderr 行不会再在文本里自我标注。
 
 > 为什么能同时做到实时与分流：给 stdout 和 stderr 各分配一个 PTY，子进程认为自己在终端里，
 > 因此保持**行缓冲**；若直接重定向到文件/管道，Python 等会切成全缓冲——实测 1.2 秒内文件里是 0 字节。
@@ -146,7 +162,7 @@ stdout 与 stderr 用的是**同一个前缀**——两条流靠去向区分，s
 ## 退出码
 
 | 码 | 含义 |
-|---|---|
+| --- | --- |
 | 0 | 成功：就绪 / already running / stop 成功 / ps / logs / skills |
 | 1 | 通用错误（含命令等待超时） |
 | 2 | 用法错误 |
@@ -169,7 +185,7 @@ stdout 与 stderr 用的是**同一个前缀**——两条流靠去向区分，s
 
 ## `.agproc/` 目录
 
-```
+```text
 .agproc/
 ├── logs/<service>.stdout.log      # 只有 run-cmd 的 stdout（session 开始时截断）
 ├── logs/<service>.stderr.log      # 只有 run-cmd 的 stderr
@@ -188,26 +204,10 @@ stdout/stderr 分别映射到 agproc 自己的两条流，并且是临时的—�
 
 `agproc init` 会把 `.agproc/` 追加进 `.gitignore`。
 
-## 给 AI Agent 使用
-
-仓库内自带一份与 [skills.sh](https://www.skills.sh/) 兼容的 Skill：
-
-```bash
-npx skills add jmjoy/agproc      # 安装 skills/agproc/SKILL.md（发现用 stub）
-agproc skills                    # 输出完整指引 + 本项目的真实 service 表
-agproc skills --json             # 同上，附结构化数据
-```
-
-`agproc skills --json` 里每个 service 的 `build_cmd` / `run_cmd` 是真正的 **argv 数组**
-（`["pnpm", "dev:serve"]`），与配置写法一致。
-
-Skill 的核心纪律：**项目根存在 `agproc.toml` 时，不要直接用 `pnpm dev` / `cargo run` 起服务**，
-先 `agproc skills` 取指引，再用 agproc 管理进程；改完代码用 `restart`，失败先看退出码再看日志。
-
 ## 设计要点
 
 - **每个 service 一个 detached runner**（`agproc __runner`，`setsid`），没有中心 daemon、没有 socket。
-  状态与日志全部是 `.agproc/` 里的普通文件，Agent 可以直接 `cat`/`grep`；
+  状态与日志全部是 `.agproc/` 里的普通文件，AI 智能体可以直接 `cat`/`grep`；
   CLI 被超时杀掉也不影响正在进行的 build 与探针。
 - **runner 是子进程生命周期的唯一权威**：独立的 `waitpid` 与探针循环并发，子进程一退出就立即落 `run-failed`，
   优先级高于任何探针结果——探针永远不会把已死的服务报成就绪。
@@ -215,11 +215,6 @@ Skill 的核心纪律：**项目根存在 `agproc.toml` 时，不要直接用 `p
   （仍属于最初那个外来进程则判失败；属于容器运行时等则只告警）；子进程退出事件优先。
 - **PID 复用安全**：状态文件记录 runner 的 `/proc/<pid>/stat` starttime，`ps` 据此判断存活。
 - **编排锁 + generation**：同一 service 同时只会有一个 start/restart；`stop` 不参与加锁，随时可打断。
-
-## 明确不做（v0.1）
-
-`depends-on` 依赖排序（当前全部并行启动）、崩溃自动重启、watch/HMR 感知、
-`https` 探针、macOS/Windows。
 
 ## License
 

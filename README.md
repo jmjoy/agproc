@@ -2,11 +2,13 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> A **dev-time process manager** for AI agents and humans alike (Linux only, for now)
+> A **dev-time process manager** for both AI agents and developers
+>
+> *(Linux only, for now)*
 
 Declare your project's long-running services (backend / frontend / workers) in `agproc.toml`;
 agproc takes care of **build → run → probe** and keeps every process's state and logs
-under `.agproc/`, so calling it repeatedly is safe for both humans and agents.
+under `.agproc/`, so calling it repeatedly is safe for both developers and AI agents.
 
 ```bash
 agproc start              # start every service in parallel, wait for the probe
@@ -19,9 +21,9 @@ agproc stop               # stop everything
 ## Why it exists
 
 | Problem | What agproc does |
-|---|---|
-| An agent edits code constantly, retriggering builds and restarts — sometimes ending up with two dev servers | `start` is **idempotent**: when the service is already running it prints `ALREADY RUNNING` and exits 0 without building or restarting anything. Pair it with a **non-watching** `run-cmd` (e.g. `vite preview`) and restart explicitly after edits, so every step is predictable |
-| Rust projects must compile before they run, and failures are scattered around | `build-cmd` and `run-cmd` are separate; a failed build gets its own marker and **exit code 4**, so an agent needs no text parsing |
+| --- | --- |
+| For dev servers with file watchers like `npm run dev`, frequent code edits by AI agents trigger chaotic rebuilds/restarts or even spawn a second dev server | `start` is **idempotent**: when the service is already running it prints `ALREADY RUNNING` and exits 0 without building or restarting anything. Pair it with a **non-watching** `run-cmd` (e.g. `vite preview`) and restart explicitly after edits, so every step is predictable |
+| For dev servers without watch mode, there needs to be a convenient way to run the "recompile + run" workflow while guaranteeing only one service process runs for both developers and AI | Separates and orchestrates `build-cmd` + `run-cmd`; build failures get their own marker and **exit code 4**, eliminating text parsing. Built-in orchestration locks and lifecycle management ensure strictly one instance runs at any time, with safe `restart` after edits |
 | "The process is still alive" is a weak signal | Built-in `http-get` / `tcp-connect` probes; failure is only declared after `failure-threshold` retries (**exit code 6**) |
 | A leftover process holds the port, so the probe "passes" against someone else's process | Port preflight warning + **ownership verification** at the moment the probe passes + child-exit-first ordering. It never reports a false success |
 | Piped output gets block buffered and early log lines never arrive | One pty per stream keeps the child **line buffered**, so output shows up as it happens |
@@ -33,8 +35,6 @@ cargo install agproc          # from crates.io (needs Rust 1.89+)
 
 # or from a checkout
 cargo install --path .
-# or just build the binary
-cargo build --release && install -m755 target/release/agproc ~/.local/bin/
 ```
 
 ## Quick start
@@ -46,9 +46,26 @@ $EDITOR agproc.toml    # fill in build-cmd / run-cmd / probe
 agproc start           # start everything and wait for the probe
 ```
 
+## For AI agents
+
+The repository ships a [skills.sh](https://www.skills.sh/)-compatible skill:
+
+```bash
+npx skills add jmjoy/agproc      # installs skills/agproc/SKILL.md (a discovery stub)
+agproc skills                    # full guide + this project's real service table
+agproc skills --json             # same content plus structured data
+```
+
+In `agproc skills --json` each service carries `build_cmd` / `run_cmd` as real **argv arrays**
+(`["pnpm", "dev:serve"]`), matching the config shape.
+
+The skill's core discipline: **when the project root has an `agproc.toml`, do not start services with
+`pnpm dev` / `cargo run`**. Run `agproc skills` first, manage processes through agproc, `restart`
+after edits, and on failure read the exit code before reading the logs.
+
 ## Commands
 
-```
+```text
 agproc start   [service...] [--timeout-seconds N]   # build + run + wait for the probe; no-op when already running
 agproc restart [service...] [--timeout-seconds N]   # stop first, then build + run + wait for the probe
 agproc stop    [service...]                         # stop a running service or cancel a build in progress
@@ -119,16 +136,18 @@ Rules:
 
 Everything agproc says itself looks like `===== LIKE THIS =====`:
 
-```
+```text
 ===== BUILDING =====
-===== BUILD SUCCEED =====            # on failure: ===== BUILD FAILED (exit code 101) =====
+===== BUILD SUCCEED =====
+===== BUILD FAILED (exit code 101) =====
 ===== RUNNING =====
 ===== PROBE ATTEMPT 2/3 FAILED: connection refused (http://127.0.0.1:3000/healthz) =====
 ===== PROBE PASSED (attempt 2) =====
 ===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code 1) =====
 ===== SERVICE EXITED (exit code 0, ready for 12s) =====
-===== STOPPED ===== / ===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
+===== STOPPED =====
+===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
 ===== START IN PROGRESS (pid 1234, phase building) =====
 ===== WARNING: PORT 3000 ALREADY IN USE BY pid 614089 (node) =====
 ```
@@ -140,13 +159,10 @@ service's log files — `agproc logs` is free of them.
 stderr, unchanged. A single service gets no prefix (so it can be piped); with several services every
 line is prefixed with the service name, padded to the **longest** name so the `|` columns line up:
 
-```
+```text
 backend  | ===== RUNNING =====          # `backend` padded to the width of `frontend`
 frontend | ===== PROBE PASSED =====
 ```
-
-stdout and stderr lines carry the **same** prefix — the streams stay apart by destination, so a
-stderr line never advertises itself in the text.
 
 > How it manages to be both live *and* split: stdout and stderr each get their own pty, so the child
 > believes it is on a terminal and stays **line buffered**. Redirect straight to a file or pipe and
@@ -156,7 +172,7 @@ stderr line never advertises itself in the text.
 ## Exit codes
 
 | Code | Meaning |
-|---|---|
+| --- | --- |
 | 0 | success: ready / already running / stopped / ps / logs / skills |
 | 1 | generic error, including "the CLI gave up waiting" |
 | 2 | usage error |
@@ -179,7 +195,7 @@ stderr line never advertises itself in the text.
 
 ## The `.agproc/` directory
 
-```
+```text
 .agproc/
 ├── logs/<service>.stdout.log      # run-cmd stdout only (truncated when a session starts)
 ├── logs/<service>.stderr.log      # run-cmd stderr only
@@ -199,23 +215,6 @@ readiness ends. Failure paths keep it, so a failed build stays diagnosable:
 
 `agproc init` appends `.agproc/` to `.gitignore`.
 
-## For AI agents
-
-The repository ships a [skills.sh](https://www.skills.sh/)-compatible skill:
-
-```bash
-npx skills add jmjoy/agproc      # installs skills/agproc/SKILL.md (a discovery stub)
-agproc skills                    # full guide + this project's real service table
-agproc skills --json             # same content plus structured data
-```
-
-In `agproc skills --json` each service carries `build_cmd` / `run_cmd` as real **argv arrays**
-(`["pnpm", "dev:serve"]`), matching the config shape.
-
-The skill's core discipline: **when the project root has an `agproc.toml`, do not start services with
-`pnpm dev` / `cargo run`**. Run `agproc skills` first, manage processes through agproc, `restart`
-after edits, and on failure read the exit code before reading the logs.
-
 ## Design notes
 
 - **One detached runner per service** (`agproc __runner`, `setsid`): no central daemon, no socket.
@@ -231,11 +230,6 @@ after edits, and on failure read the exit code before reading the logs.
 - **PID-reuse safe**: state records the runner's `/proc/<pid>/stat` start time, which `ps` checks.
 - **Orchestration lock + generation**: only one start/restart per service at a time, while `stop`
   never takes the lock so it can always interrupt.
-
-## Explicitly out of scope (v0.1)
-
-`depends-on` ordering (everything starts in parallel today), automatic restart on crash,
-watch/HMR awareness, `https` probes, macOS/Windows.
 
 ## License
 
