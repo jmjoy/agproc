@@ -2,13 +2,13 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> A **dev-time process manager** for both AI agents and developers
+> A **dev-time process manager** for both AI agents and humans
 >
 > *(Linux only, for now)*
 
 Declare your project's long-running services (backend / frontend / workers) in `agproc.toml`;
 agproc takes care of **build → run → probe** and keeps every process's state and logs
-under `.agproc/`, so calling it repeatedly is safe for both developers and AI agents.
+under `.agproc/`, so calling it repeatedly is safe for both humans and AI agents.
 
 ```bash
 agproc start              # start every service in parallel, wait for the probe
@@ -23,7 +23,7 @@ agproc stop               # stop everything
 | Problem | What agproc does |
 | --- | --- |
 | For dev servers with file watchers like `npm run dev`, frequent code edits by AI agents trigger chaotic rebuilds/restarts or even spawn a second dev server | `start` is **idempotent**: when the service is already running it prints `ALREADY RUNNING` and exits 0 without building or restarting anything. Pair it with a **non-watching** `run-cmd` (e.g. `vite preview`) and restart explicitly after edits, so every step is predictable |
-| For dev servers without watch mode, there needs to be a convenient way to run the "recompile + run" workflow while guaranteeing only one service process runs for both developers and AI | Separates and orchestrates `build-cmd` + `run-cmd`; build failures get their own marker and **exit code 4**, eliminating text parsing. Built-in orchestration locks and lifecycle management ensure strictly one instance runs at any time, with safe `restart` after edits |
+| For dev servers without watch mode, there needs to be a convenient way to run the "recompile + run" workflow while guaranteeing only one service process runs for both humans and AI agents | Separates and orchestrates `build-cmd` + `run-cmd`; build failures get their own marker and **exit code 4**, eliminating text parsing. Built-in orchestration locks and lifecycle management ensure strictly one instance runs at any time, with safe `restart` after edits |
 | "The process is still alive" is a weak signal | Built-in `http-get` / `tcp-connect` probes; failure is only declared after `failure-threshold` retries (**exit code 6**) |
 | A leftover process holds the port, so the probe "passes" against someone else's process | Port preflight warning + **ownership verification** at the moment the probe passes + child-exit-first ordering. It never reports a false success |
 | Piped output gets block buffered and early log lines never arrive | One pty per stream keeps the child **line buffered**, so output shows up as it happens |
