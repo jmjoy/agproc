@@ -72,7 +72,6 @@ agproc init    [--force]                            # write a config template
 
 ```toml
 [settings]
-shell = "sh"                      # string commands run as <shell> -c "<cmd>"
 stop-timeout-seconds = 10         # SIGTERM -> SIGKILL grace period
 log-max-bytes = 33554432          # rotate a log past 32 MiB into <name>.1 (0 = never)
 port-check = true                 # port preflight + ownership verification
@@ -81,9 +80,9 @@ port-check = true                 # port preflight + ownership verification
 name = "backend"                  # required, unique, [A-Za-z0-9._-]
 cwd = "."                         # optional, relative to the project root
 env = { RUST_LOG = "debug" }      # optional, merged into the inherited environment
-build-cmd = "cargo build"         # optional; without it the BUILD phase is skipped
+build-cmd = ["cargo", "build"]    # optional; without it the BUILD phase is skipped
 build-timeout-seconds = 0         # optional; 0 = no limit
-run-cmd = "./target/debug/api"    # required; string = <shell> -c, array = exec directly
+run-cmd = ["./target/debug/api"]  # required; argv array, executed directly (no shell)
 stop-timeout-seconds = 10         # optional, overrides [settings]
 
 probe = {                         # optional; without it "still alive" means ready
@@ -107,6 +106,11 @@ Rules:
 
 - Every key is kebab-case and **unknown keys are rejected** — configs are often written by agents,
   and a typo must fail immediately instead of silently doing nothing.
+- `build-cmd` / `run-cmd` are **argv arrays executed directly**, with no shell in between: the first
+  element is the program, the rest are its arguments (so `"cargo build"` is not a command — write
+  `["cargo", "build"]`). Shell syntax (`|`, `&&`, `>`, globs, `$VAR`) needs an explicit shell:
+  `run-cmd = ["sh", "-c", "a | b"]`. The old string form (which ran `<shell> -c "..."`) and the
+  `[settings] shell` key are gone; a string is rejected at load time (exit 3) with the fix in the message.
 - `http-get` supports `http` only (local dev endpoints); `https` fails at load time. `2xx/3xx` count
   as ready.
 - Multiple services are started **in parallel**.
@@ -133,8 +137,16 @@ Everything agproc says itself looks like `===== LIKE THIS =====`:
 service's log files — `agproc logs` is free of them.
 
 **Streams stay separate**: a child's stdout goes to agproc's stdout and its stderr to agproc's
-stderr, unchanged. A single service gets no prefix (so it can be piped); with several services the
-prefixes are `backend | ` and `backend stderr | `.
+stderr, unchanged. A single service gets no prefix (so it can be piped); with several services every
+line is prefixed with the service name, padded to the **longest** name so the `|` columns line up:
+
+```
+backend  | ===== RUNNING =====          # `backend` padded to the width of `frontend`
+frontend | ===== PROBE PASSED =====
+```
+
+stdout and stderr lines carry the **same** prefix — the streams stay apart by destination, so a
+stderr line never advertises itself in the text.
 
 > How it manages to be both live *and* split: stdout and stderr each get their own pty, so the child
 > believes it is on a terminal and stays **line buffered**. Redirect straight to a file or pipe and
@@ -196,6 +208,9 @@ npx skills add jmjoy/agproc      # installs skills/agproc/SKILL.md (a discovery 
 agproc skills                    # full guide + this project's real service table
 agproc skills --json             # same content plus structured data
 ```
+
+In `agproc skills --json` each service carries `build_cmd` / `run_cmd` as real **argv arrays**
+(`["pnpm", "dev:serve"]`), matching the config shape.
 
 The skill's core discipline: **when the project root has an `agproc.toml`, do not start services with
 `pnpm dev` / `cargo run`**. Run `agproc skills` first, manage processes through agproc, `restart`

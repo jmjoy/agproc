@@ -375,27 +375,26 @@ impl LogFollower {
 
 /// Relays both log files of one service to our own stdout/stderr, preserving
 /// the stream split and adding a prefix per line when several services are in
-/// scope. Used by `agproc start` (live) and `agproc logs` (replay/follow).
+/// scope. Both streams share that prefix; they stay apart by destination.
+/// Used by `agproc start` (live) and `agproc logs` (replay/follow).
 pub struct LogRelay {
     out: LogFollower,
     err: LogFollower,
     out_lines: LineBuffer,
     err_lines: LineBuffer,
-    pub prefix_out: String,
-    pub prefix_err: String,
+    prefix: String,
     enabled_out: bool,
     enabled_err: bool,
 }
 
 impl LogRelay {
-    pub fn new(out_path: PathBuf, err_path: PathBuf, prefix_out: String, prefix_err: String) -> Self {
+    pub fn new(out_path: PathBuf, err_path: PathBuf, prefix: String) -> Self {
         Self {
             out: LogFollower::new(out_path),
             err: LogFollower::new(err_path),
             out_lines: LineBuffer::new(),
             err_lines: LineBuffer::new(),
-            prefix_out,
-            prefix_err,
+            prefix,
             enabled_out: true,
             enabled_err: true,
         }
@@ -419,7 +418,7 @@ impl LogRelay {
             let stdout = self.out.read_new()?;
             if !stdout.is_empty() {
                 any = true;
-                let prefix = self.prefix_out.clone();
+                let prefix = self.prefix.clone();
                 self.out_lines
                     .push(&stdout, |line| emit(false, &prefix, line));
             }
@@ -428,7 +427,7 @@ impl LogRelay {
             let stderr = self.err.read_new()?;
             if !stderr.is_empty() {
                 any = true;
-                let prefix = self.prefix_err.clone();
+                let prefix = self.prefix.clone();
                 self.err_lines
                     .push(&stderr, |line| emit(true, &prefix, line));
             }
@@ -438,9 +437,9 @@ impl LogRelay {
 
     /// Emit any trailing partial line (called once when forwarding stops).
     pub fn flush(&mut self) {
-        let prefix = self.prefix_out.clone();
+        let prefix = self.prefix.clone();
         self.out_lines.flush(|line| emit(false, &prefix, line));
-        let prefix = self.prefix_err.clone();
+        let prefix = self.prefix.clone();
         self.err_lines.flush(|line| emit(true, &prefix, line));
     }
 }

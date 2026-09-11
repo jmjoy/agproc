@@ -63,9 +63,12 @@ fn render(root: &Path) -> String {
          #\n\
          # start   : build (if needed) + run + wait for the probe; a no-op when already running\n\
          # restart : stop, then build + run + wait for the probe\n\
-         # stop/ps/logs: manage and inspect what agproc started\n\n\
+         # stop/ps/logs: manage and inspect what agproc started\n\
+         #\n\
+         # build-cmd / run-cmd are argv arrays, executed directly (no shell):\n\
+         #   run-cmd = [\"cargo\", \"run\"]           # program + arguments\n\
+         #   run-cmd = [\"sh\", \"-c\", \"a | b\"]      # only when you need shell syntax\n\n\
          [settings]\n\
-         # shell = \"sh\"                      # shell for the string form of build-cmd / run-cmd\n\
          # stop-timeout-seconds = 10         # SIGTERM -> SIGKILL grace period\n\
          # log-max-bytes = 33554432          # rotate .agproc/logs/*.log past 32 MiB (0 disables)\n\
          # port-check = true                 # warn about foreign listeners on the probe port\n\n",
@@ -78,8 +81,8 @@ fn render(root: &Path) -> String {
         Some(name) => out.push_str(&format!(
             "[[service]]\n\
              name = \"backend\"\n\
-             build-cmd = \"cargo build\"\n\
-             run-cmd = \"./target/debug/{name}\"\n\
+             build-cmd = [\"cargo\", \"build\"]\n\
+             run-cmd = [\"./target/debug/{name}\"]\n\
              probe = {{\n\
              \x20 http-get = {{ scheme = \"http\", host = \"127.0.0.1\", port = 3000, path = \"/healthz\" }},\n\
              \x20 initial-delay-seconds = 1,\n\
@@ -91,8 +94,8 @@ fn render(root: &Path) -> String {
         None => out.push_str(
             "# [[service]]\n\
              # name = \"backend\"\n\
-             # build-cmd = \"cargo build\"\n\
-             # run-cmd = \"./target/debug/my-backend\"\n\
+             # build-cmd = [\"cargo\", \"build\"]\n\
+             # run-cmd = [\"./target/debug/my-backend\"]\n\
              # probe = { http-get = { port = 3000, path = \"/healthz\" },\n\
              #                     initial-delay-seconds = 1, period-seconds = 1,\n\
              #                     timeout-seconds = 2, failure-threshold = 3 }\n\n",
@@ -102,23 +105,23 @@ fn render(root: &Path) -> String {
     let mut frontend = String::from("# [[service]]\n# name = \"frontend\"\n");
     if let Some(scripts) = &node {
         if scripts.iter().any(|s| s == "build") {
-            frontend.push_str("# build-cmd = \"pnpm build\"\n");
+            frontend.push_str("# build-cmd = [\"pnpm\", \"build\"]\n");
         }
         frontend.push_str(
             "# # run-cmd should NOT watch files: agproc restarts it explicitly, so a\n\
              # # non-watch server (e.g. `vite preview`) keeps restarts meaningful.\n",
         );
         if scripts.iter().any(|s| s == "preview") {
-            frontend.push_str("# run-cmd = \"pnpm preview --port 5173\"\n");
+            frontend.push_str("# run-cmd = [\"pnpm\", \"preview\", \"--port\", \"5173\"]\n");
         } else if scripts.iter().any(|s| s == "dev") {
-            frontend.push_str("# run-cmd = \"pnpm dev --port 5173\"   # only if it does not watch files\n");
+            frontend.push_str("# run-cmd = [\"pnpm\", \"dev\", \"--port\", \"5173\"]   # only if it does not watch files\n");
         } else {
-            frontend.push_str("# run-cmd = \"pnpm start\"\n");
+            frontend.push_str("# run-cmd = [\"pnpm\", \"start\"]\n");
         }
     } else {
         frontend.push_str(
-            "# build-cmd = \"pnpm build\"\n\
-             # run-cmd = \"pnpm preview --port 5173\"\n",
+            "# build-cmd = [\"pnpm\", \"build\"]\n\
+             # run-cmd = [\"pnpm\", \"preview\", \"--port\", \"5173\"]\n",
         );
     }
     frontend.push_str(
@@ -181,9 +184,18 @@ mod tests {
         assert_eq!(run(args).unwrap(), crate::exit::OK);
 
         let config = std::fs::read_to_string(root.join("agproc.toml")).unwrap();
-        assert!(config.contains("run-cmd = \"./target/debug/demo-app\""), "{config}");
-        assert!(config.contains("pnpm preview --port 5173"), "{config}");
+        assert!(
+            config.contains("run-cmd = [\"./target/debug/demo-app\"]"),
+            "{config}"
+        );
+        assert!(
+            config.contains("[\"pnpm\", \"preview\", \"--port\", \"5173\"]"),
+            "{config}"
+        );
         assert!(config.contains("tcp-connect"), "{config}");
+        // The template must load as-is.
+        let loaded = crate::config::load(&root.join("agproc.toml")).unwrap();
+        assert_eq!(loaded.config.services.len(), 1);
 
         let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(gitignore.contains(".agproc/"), "{gitignore}");

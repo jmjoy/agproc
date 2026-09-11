@@ -14,7 +14,7 @@ use nix::sys::signal::Signal;
 use std::time::{Duration, Instant};
 
 use crate::cli::Failure;
-use crate::cmd::Prefix;
+use crate::cmd::{Prefix, prefix_width};
 use crate::config::{Config, Service, Settings};
 use crate::exit;
 use crate::paths::Project;
@@ -34,12 +34,12 @@ pub enum StopOutcome {
 /// Stop every selected service concurrently.
 pub fn run(project: &Project, config: &Config, services: Vec<&Service>) -> Result<i32, Failure> {
     let settings = config.settings.clone();
-    let multi = services.len() > 1;
+    let width = prefix_width(services.iter().map(|service| service.name.as_str()));
     let mut results: Vec<(String, Result<StopOutcome, String>)> = Vec::new();
 
     if services.len() == 1 {
         let service = services[0];
-        let prefix = Prefix::service(&service.name, multi);
+        let prefix = Prefix::service(&service.name, width);
         let outcome = stop_service(project, &settings, service, &prefix)
             .map_err(|err| format!("{err:#}"));
         results.push((service.name.clone(), outcome));
@@ -51,7 +51,7 @@ pub fn run(project: &Project, config: &Config, services: Vec<&Service>) -> Resul
             let name = service.name.clone();
             let service = service.clone();
             handles.push(std::thread::spawn(move || {
-                let prefix = Prefix::service(&name, true);
+                let prefix = Prefix::service(&name, width);
                 let outcome = stop_service(&project, &settings, &service, &prefix)
                     .map_err(|err| format!("{err:#}"));
                 (name, outcome)

@@ -67,7 +67,6 @@ agproc init    [--force]                            # 生成模板
 
 ```toml
 [settings]
-shell = "sh"                      # string 形式的 cmd 用 <shell> -c 执行
 stop-timeout-seconds = 10         # SIGTERM -> SIGKILL 宽限期
 log-max-bytes = 33554432          # 单文件超过 32 MiB 轮转为 <name>.1（0 = 不限）
 port-check = true                 # 端口预检 + 归属校验
@@ -76,9 +75,9 @@ port-check = true                 # 端口预检 + 归属校验
 name = "backend"                  # 必填，唯一，[A-Za-z0-9._-]
 cwd = "."                         # 可选，相对项目根
 env = { RUST_LOG = "debug" }      # 可选，合并进继承的环境
-build-cmd = "cargo build"         # 可选；省略则跳过 BUILD 阶段
+build-cmd = ["cargo", "build"]    # 可选；省略则跳过 BUILD 阶段
 build-timeout-seconds = 0         # 可选；0 = 不限
-run-cmd = "./target/debug/api"    # 必填；string = <shell> -c，数组 = 直接 exec
+run-cmd = ["./target/debug/api"]  # 必填；argv 数组，直接 exec（不经 shell）
 stop-timeout-seconds = 10         # 可选，覆盖 settings
 
 probe = {                         # 可选；省略则「进程存活」即视为就绪
@@ -101,6 +100,11 @@ probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
 规则：
 
 - 字面量一律 kebab-case；**未知字段直接报错**（配置往往由 Agent 编写，写错键名必须立刻失败）。
+- `build-cmd` / `run-cmd` 是 **argv 数组、直接 exec**，中间没有 shell：第一个元素是程序，其余是参数
+  （所以 `"cargo build"` 不是命令，要写 `["cargo", "build"]`）。需要 shell 语法（`|`、`&&`、`>`、
+  通配符、`$VAR`）时显式写 `run-cmd = ["sh", "-c", "a | b"]`。旧的字符串形式（会执行
+  `<shell> -c "..."`）与 `[settings] shell` 已移除：字符串在加载阶段就报错（退出码 3），
+  错误信息里直接给出改法。
 - `http-get` 仅支持 `http`（本地开发端点），`https` 会在加载时报错；`2xx/3xx` 视为通过。
 - 多个 service 会**并行**启动。
 
@@ -126,7 +130,15 @@ agproc 自己的日志统一是 `===== XXX =====`：
 所以 `agproc logs` 的输出里不会出现它们。
 
 **流分离**：子进程的 stdout 原样进入 agproc 的 stdout，stderr 原样进入 agproc 的 stderr。
-单 service 时不加前缀（可直接管道）；多个 service 时前缀为 `backend | ` 与 `backend stderr | `。
+单 service 时不加前缀（可直接管道）；多个 service 时每行都带服务名前缀，名字按**最长**的那个补齐
+空格，让 `|` 列对齐：
+
+```
+backend  | ===== RUNNING =====          # `backend` 补齐到 `frontend` 的宽度
+frontend | ===== PROBE PASSED =====
+```
+
+stdout 与 stderr 用的是**同一个前缀**——两条流靠去向区分，stderr 行不会再在文本里自我标注。
 
 > 为什么能同时做到实时与分流：给 stdout 和 stderr 各分配一个 PTY，子进程认为自己在终端里，
 > 因此保持**行缓冲**；若直接重定向到文件/管道，Python 等会切成全缓冲——实测 1.2 秒内文件里是 0 字节。
@@ -185,6 +197,9 @@ npx skills add jmjoy/agproc      # 安装 skills/agproc/SKILL.md（发现用 stu
 agproc skills                    # 输出完整指引 + 本项目的真实 service 表
 agproc skills --json             # 同上，附结构化数据
 ```
+
+`agproc skills --json` 里每个 service 的 `build_cmd` / `run_cmd` 是真正的 **argv 数组**
+（`["pnpm", "dev:serve"]`），与配置写法一致。
 
 Skill 的核心纪律：**项目根存在 `agproc.toml` 时，不要直接用 `pnpm dev` / `cargo run` 起服务**，
 先 `agproc skills` 取指引，再用 agproc 管理进程；改完代码用 `restart`，失败先看退出码再看日志。

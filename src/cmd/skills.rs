@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::Failure;
-use crate::config::{Cmd, Config, LoadedConfig};
+use crate::config::{Config, LoadedConfig};
 use crate::exit;
 use crate::paths::Project;
 
@@ -26,8 +26,8 @@ struct SkillDoc {
 struct ServiceInfo {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    build_cmd: Option<String>,
-    run_cmd: String,
+    build_cmd: Option<Vec<String>>,
+    run_cmd: Vec<String>,
     probe_kind: String,
     probe_target: String,
     cwd: String,
@@ -124,8 +124,8 @@ fn service_infos(project: &Project, config: &Config) -> Vec<ServiceInfo> {
         .iter()
         .map(|service| ServiceInfo {
             name: service.name.clone(),
-            build_cmd: service.build_cmd.as_ref().map(Cmd::display),
-            run_cmd: service.run_cmd.display(),
+            build_cmd: service.build_cmd.as_ref().map(|cmd| cmd.argv().to_vec()),
+            run_cmd: service.run_cmd.argv().to_vec(),
             probe_kind: service.target().kind_str().to_string(),
             probe_target: service.target().describe(),
             cwd: service.cwd_path(project).display().to_string(),
@@ -240,20 +240,20 @@ mod tests {
             r#"
 [[service]]
 name = "backend"
-build-cmd = "cargo build"
-run-cmd = "./target/debug/api"
+build-cmd = ["cargo", "build"]
+run-cmd = ["./target/debug/api"]
 probe = { http-get = { port = 3000, path = "/healthz" } }
 
 [[service]]
 name = "frontend"
-run-cmd = "pnpm preview"
+run-cmd = ["pnpm", "preview"]
 probe = { tcp-connect = { port = 5173 } }
 "#,
         );
         let loaded = crate::config::load(&project.config_path).unwrap();
         let section = project_section(&project, &loaded);
-        assert!(section.contains("`cargo build`"), "{section}");
-        assert!(section.contains("`./target/debug/api`"), "{section}");
+        assert!(section.contains(r#"`["cargo", "build"]`"#), "{section}");
+        assert!(section.contains(r#"`["./target/debug/api"]`"#), "{section}");
         assert!(section.contains("http://127.0.0.1:3000/healthz"), "{section}");
         assert!(section.contains("`agproc restart frontend`"), "{section}");
         assert!(section.contains(".agproc/logs/backend.stdout.log"), "{section}");
@@ -277,12 +277,15 @@ probe = { tcp-connect = { port = 5173 } }
         let dir = tempfile::tempdir().unwrap();
         let project = project_with(
             dir.path(),
-            "[[service]]\nname = \"api\"\nrun-cmd = \"sleep 1\"\n",
+            "[[service]]\nname = \"api\"\nrun-cmd = [\"sleep\", \"1\"]\n",
         );
         let loaded = crate::config::load(&project.config_path).unwrap();
         let infos = service_infos(&project, &loaded.config);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "api");
+        // The JSON carries the command as a real argv array, not a string.
+        assert_eq!(infos[0].run_cmd, ["sleep", "1"]);
+        assert_eq!(infos[0].build_cmd, None);
         assert_eq!(infos[0].probe_kind, "none");
         assert!(infos[0].log_stdout.ends_with("api.stdout.log"));
     }

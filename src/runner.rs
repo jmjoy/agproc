@@ -178,7 +178,6 @@ fn inner(args: Args) -> Result<i32> {
     session.publish()?;
 
     let cwd = session.service.cwd_path(&session.project);
-    let shell = session.settings.shell.clone();
     let env = session.service.env.clone();
     let stop_timeout = session.stop_timeout();
 
@@ -188,10 +187,10 @@ fn inner(args: Args) -> Result<i32> {
         session.state.build_started_at = Some(now_unix_ms());
         session.publish()?;
 
-        let argv = build_cmd.argv(&shell);
+        let argv = build_cmd.argv();
         let timeout = (session.service.build_timeout() > 0)
             .then(|| Duration::from_secs(session.service.build_timeout()));
-        let mut running = match Running::start(&argv, &cwd, &env) {
+        let mut running = match Running::start(argv, &cwd, &env) {
             Ok(running) => running,
             Err(err) => {
                 session.state.build_finished_at = Some(now_unix_ms());
@@ -261,8 +260,8 @@ fn inner(args: Args) -> Result<i32> {
     // started and hold run-cmd output only.
     session.sink.begin_run()?;
 
-    let argv = session.service.run_cmd.argv(&shell);
-    let mut running = match Running::start(&argv, &cwd, &env) {
+    let argv = session.service.run_cmd.argv();
+    let mut running = match Running::start(argv, &cwd, &env) {
         Ok(running) => running,
         Err(err) => {
             session.state.run_finished_at = Some(now_unix_ms());

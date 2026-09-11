@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::cli::Failure;
 use crate::cmd::stop::{reap_orphan_group, stop_service};
-use crate::cmd::{Prefix, select_services};
+use crate::cmd::{Prefix, prefix_width, select_services};
 use crate::config::{Config, Service, Settings};
 use crate::exit;
 use crate::lock::Lock;
@@ -68,12 +68,12 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
         .collect();
     let settings = config.settings.clone();
     let hash = config_hash(project);
-    let multi = services.len() > 1;
+    let width = prefix_width(services.iter().map(|service| service.name.as_str()));
 
     let mut results: Vec<(String, Result<Started, Failed>)> = Vec::new();
     if services.len() == 1 {
         let service = &services[0];
-        let prefix = Prefix::service(&service.name, multi);
+        let prefix = Prefix::service(&service.name, width);
         results.push((
             service.name.clone(),
             start_one(
@@ -94,7 +94,7 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
             let hash = hash.clone();
             let (restart, timeout) = (request.restart, request.timeout);
             handles.push(std::thread::spawn(move || {
-                let prefix = Prefix::service(&service.name, true);
+                let prefix = Prefix::service(&service.name, width);
                 let name = service.name.clone();
                 let outcome = start_one(
                     &project,
@@ -257,8 +257,7 @@ fn start_one(
     let mut relay = LogRelay::new(
         project.console_stdout(name),
         project.console_stderr(name),
-        prefix.out.clone(),
-        prefix.err.clone(),
+        prefix.label.clone(),
     );
 
     let started = Instant::now();

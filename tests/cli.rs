@@ -156,13 +156,13 @@ stop-timeout-seconds = 2
 
 [[service]]
 name = "backend"
-build-cmd = "echo building-backend"
-run-cmd = "sh -c 'echo serving-backend; sleep 120'"
+build-cmd = ["echo", "building-backend"]
+run-cmd = ["sh", "-c", "echo serving-backend; sleep 120"]
 
 [[service]]
 name = "frontend"
-build-cmd = "echo building-frontend"
-run-cmd = "sh -c 'echo serving-frontend; sleep 120'"
+build-cmd = ["echo", "building-frontend"]
+run-cmd = ["sh", "-c", "echo serving-frontend; sleep 120"]
 "#,
     );
 
@@ -176,10 +176,11 @@ run-cmd = "sh -c 'echo serving-frontend; sleep 120'"
     ] {
         assert!(has(&text, marker), "missing {marker}");
     }
-    // Multi-service invocations label every line.
-    has(&text, "backend | ===== BUILDING =====");
+    // Multi-service invocations label every line, with the name padded to the
+    // longest one (`frontend`) so the `|` columns line up.
+    has(&text, "backend  | ===== BUILDING =====");
     has(&text, "frontend | ===== RUNNING =====");
-    has(&text, "backend | serving-backend");
+    has(&text, "backend  | serving-backend");
     has(&text, "frontend | serving-frontend");
 
     let ps = project.ps_json();
@@ -196,7 +197,7 @@ run-cmd = "sh -c 'echo serving-frontend; sleep 120'"
 
     let (code, text) = project.combined(&["stop"]);
     assert_eq!(code, 0, "stop failed:\n{text}");
-    has(&text, "backend | ===== STOPPED =====");
+    has(&text, "backend  | ===== STOPPED =====");
     has(&text, "frontend | ===== STOPPED =====");
 
     let ps = project.ps_json();
@@ -210,13 +211,56 @@ run-cmd = "sh -c 'echo serving-frontend; sleep 120'"
 }
 
 #[test]
+fn multi_service_prefixes_are_padded_and_shared_by_both_streams() {
+    let project = Project::new(
+        r#"
+[settings]
+stop-timeout-seconds = 2
+
+[[service]]
+name = "backend"
+run-cmd = ["sh", "-c", "echo out-backend; echo err-backend >&2; sleep 120"]
+
+[[service]]
+name = "frontend"
+run-cmd = ["sh", "-c", "echo out-frontend; sleep 120"]
+"#,
+    );
+
+    let output = project.agproc(&["start"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The shorter name is padded to the width of the longest one.
+    has(&stdout, "backend  | out-backend");
+    has(&stdout, "frontend | out-frontend");
+    assert!(
+        !stdout.contains("backend | "),
+        "a short service name must be padded:\n{stdout}"
+    );
+
+    // stderr carries exactly the stdout prefix: no textual stream marker.
+    has(&stderr, "backend  | err-backend");
+    assert!(
+        !stderr.contains("stderr | "),
+        "stderr lines must not be labelled:\n{stderr}"
+    );
+
+    let (code, text) = project.combined(&["stop"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "backend  | ===== STOPPED =====");
+    has(&text, "frontend | ===== STOPPED =====");
+}
+
+#[test]
 fn start_is_idempotent_and_restart_rebuilds() {
     let project = Project::new(
         r#"
 [[service]]
 name = "api"
-build-cmd = "echo build-run"
-run-cmd = "sh -c 'echo serve-run; sleep 120'"
+build-cmd = ["echo", "build-run"]
+run-cmd = ["sh", "-c", "echo serve-run; sleep 120"]
 "#,
     );
 
@@ -257,7 +301,7 @@ fn stdout_and_stderr_stay_separate() {
         r#"
 [[service]]
 name = "chatty"
-run-cmd = "sh -c 'echo only-on-stdout; echo only-on-stderr >&2; sleep 120'"
+run-cmd = ["sh", "-c", "echo only-on-stdout; echo only-on-stderr >&2; sleep 120"]
 "#,
     );
 
@@ -290,8 +334,8 @@ fn build_failure_reports_exit_code_4() {
         r#"
 [[service]]
 name = "badbuild"
-build-cmd = "echo compile-error; exit 101"
-run-cmd = "sleep 120"
+build-cmd = ["sh", "-c", "echo compile-error; exit 101"]
+run-cmd = ["sleep", "120"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
@@ -307,8 +351,8 @@ fn run_failure_reports_exit_code_5() {
         r#"
 [[service]]
 name = "instant"
-build-cmd = "true"
-run-cmd = "sh -c 'echo crashing; exit 3'"
+build-cmd = ["true"]
+run-cmd = ["sh", "-c", "echo crashing; exit 3"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
@@ -324,8 +368,8 @@ fn probe_failure_reports_exit_code_6_and_stops_the_child() {
         r#"
 [[service]]
 name = "hopeless"
-build-cmd = "true"
-run-cmd = "sh -c 'echo alive-but-not-listening; sleep 120'"
+build-cmd = ["true"]
+run-cmd = ["sh", "-c", "echo alive-but-not-listening; sleep 120"]
 probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 2 }}
 "#
     ));
@@ -363,7 +407,7 @@ fn a_foreign_listener_on_the_probe_port_is_never_reported_as_ready() {
         r#"
 [[service]]
 name = "victim"
-run-cmd = "sh -c 'echo pretending-to-serve; sleep 120'"
+run-cmd = ["sh", "-c", "echo pretending-to-serve; sleep 120"]
 probe = {{ http-get = {{ port = {port}, path = "/healthz" }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 2 }}
 "#
     ));
@@ -387,8 +431,8 @@ fn a_second_start_reports_the_running_one_instead_of_racing() {
         r#"
 [[service]]
 name = "slow"
-build-cmd = "echo building; sleep 4; echo built"
-run-cmd = "sh -c 'echo serving; sleep 120'"
+build-cmd = ["sh", "-c", "echo building; sleep 4; echo built"]
+run-cmd = ["sh", "-c", "echo serving; sleep 120"]
 "#,
     );
 
@@ -428,8 +472,8 @@ stop-timeout-seconds = 2
 
 [[service]]
 name = "slowbuild"
-build-cmd = "echo building-slowly; sleep 60; echo never"
-run-cmd = "sleep 60"
+build-cmd = ["sh", "-c", "echo building-slowly; sleep 60; echo never"]
+run-cmd = ["sleep", "60"]
 "#,
     );
 
@@ -473,7 +517,7 @@ fn a_killed_runner_is_reported_as_stale_and_start_recovers() {
         r#"
 [[service]]
 name = "api"
-run-cmd = "sh -c 'echo serving; sleep 120'"
+run-cmd = ["sh", "-c", "echo serving; sleep 120"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
@@ -502,8 +546,8 @@ fn cli_timeout_leaves_the_runner_working() {
         r#"
 [[service]]
 name = "slowpoke"
-build-cmd = "sleep 5; echo built"
-run-cmd = "sh -c 'echo serving; sleep 120'"
+build-cmd = ["sh", "-c", "sleep 5; echo built"]
+run-cmd = ["sh", "-c", "echo serving; sleep 120"]
 "#,
     );
     let (code, text) = project.combined(&["start", "--timeout-seconds", "1"]);
@@ -532,11 +576,11 @@ stop-timeout-seconds = 10
 
 [[service]]
 name = "a"
-run-cmd = "sh slow-stop.sh a"
+run-cmd = ["sh", "slow-stop.sh", "a"]
 
 [[service]]
 name = "b"
-run-cmd = "sh slow-stop.sh b"
+run-cmd = ["sh", "slow-stop.sh", "b"]
 "#,
     );
     project.write(
@@ -581,12 +625,12 @@ fn the_start_console_still_narrates_every_phase() {
         r#"
 [[service]]
 name = "quiet"
-build-cmd = "echo building-quiet"
-run-cmd = "sh -c 'echo serving-quiet; sleep 120'"
+build-cmd = ["echo", "building-quiet"]
+run-cmd = ["sh", "-c", "echo serving-quiet; sleep 120"]
 
 [[service]]
 name = "other"
-run-cmd = "sh -c 'echo serving-other; sleep 120'"
+run-cmd = ["sh", "-c", "echo serving-other; sleep 120"]
 "#,
     );
 
@@ -613,7 +657,7 @@ fn logs_shows_only_the_last_run_cmd_output() {
         r#"
 [[service]]
 name = "ticker"
-run-cmd = "sh -c 'i=0; while true; do echo out-$$-$i; echo err-$$-$i >&2; i=$((i+1)); sleep 0.3; done'"
+run-cmd = ["sh", "-c", "i=0; while true; do echo out-$$-$i; echo err-$$-$i >&2; i=$((i+1)); sleep 0.3; done"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
@@ -688,7 +732,7 @@ fn logs_all_is_gone() {
         r#"
 [[service]]
 name = "svc"
-run-cmd = "sleep 120"
+run-cmd = ["sleep", "120"]
 "#,
     );
     let (code, _) = project.combined(&["logs", "--all"]);
@@ -701,8 +745,8 @@ fn build_output_is_shown_live_and_kept_out_of_the_logs() {
         r#"
 [[service]]
 name = "badbuild"
-build-cmd = "echo compile-error; echo compile-error-on-stderr >&2; exit 101"
-run-cmd = "sleep 120"
+build-cmd = ["sh", "-c", "echo compile-error; echo compile-error-on-stderr >&2; exit 101"]
+run-cmd = ["sleep", "120"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
@@ -732,7 +776,7 @@ fn the_console_stream_stops_growing_once_readiness_settled() {
         r#"
 [[service]]
 name = "ticker"
-run-cmd = "sh -c 'i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.05; done'"
+run-cmd = ["sh", "-c", "i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.05; done"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
@@ -765,7 +809,7 @@ fn every_probe_attempt_is_reported() {
         r#"
 [[service]]
 name = "hopeless"
-run-cmd = "sh -c 'echo waiting; sleep 60'"
+run-cmd = ["sh", "-c", "echo waiting; sleep 60"]
 probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 3 }}
 "#
     ));
@@ -785,11 +829,11 @@ fn ps_reports_states_and_json_stays_parseable() {
         r#"
 [[service]]
 name = "up"
-run-cmd = "sh -c 'echo up; sleep 120'"
+run-cmd = ["sh", "-c", "echo up; sleep 120"]
 
 [[service]]
 name = "down"
-run-cmd = "sleep 120"
+run-cmd = ["sleep", "120"]
 probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 1, failure-threshold = 1 }}
 "#
     ));
@@ -837,8 +881,8 @@ fn a_listener_owned_by_the_service_counts_as_ready() {
         r#"
 [[service]]
 name = "server"
-build-cmd = "echo preparing"
-run-cmd = "python3 -m http.server {port} --bind 127.0.0.1"
+build-cmd = ["echo", "preparing"]
+run-cmd = ["python3", "-m", "http.server", "{port}", "--bind", "127.0.0.1"]
 probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 3 }}
 "#
     ));
@@ -855,16 +899,16 @@ fn skills_describe_the_real_services_and_work_anywhere() {
         r#"
 [[service]]
 name = "backend"
-build-cmd = "cargo build"
-run-cmd = "./target/debug/api"
+build-cmd = ["cargo", "build"]
+run-cmd = ["./target/debug/api"]
 probe = { http-get = { port = 3000, path = "/healthz" } }
 "#,
     );
     let (code, text) = project.combined(&["skills"]);
     assert_eq!(code, 0);
     has(&text, "## This project");
-    has(&text, "`cargo build`");
-    has(&text, "./target/debug/api");
+    has(&text, "[\"cargo\", \"build\"]");
+    has(&text, "[\"./target/debug/api\"]");
     has(&text, "http://127.0.0.1:3000/healthz");
     has(&text, "agproc restart backend");
     has(&text, "===== ALREADY RUNNING");
@@ -917,7 +961,7 @@ fn configuration_errors_exit_with_3() {
         r#"
 [[service]]
 name = "api"
-run-cmd = "sleep 1"
+run-cmd = ["sleep", "1"]
 "#,
     );
     let (code, text) = project.combined(&["start", "nope"]);
@@ -929,7 +973,7 @@ run-cmd = "sleep 1"
         r#"
 [[service]]
 name = "api"
-run_cmd = "sleep 1"
+run_cmd = ["sleep", "1"]
 "#,
     );
     let (code, text) = broken.combined(&["ps"]);
@@ -938,8 +982,37 @@ run_cmd = "sleep 1"
 }
 
 #[test]
+fn the_string_form_of_a_command_is_rejected_with_a_fix() {
+    // build-cmd / run-cmd are argv arrays executed without a shell; the old
+    // string form must fail loudly instead of silently running `<shell> -c`.
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = "cargo run"
+"#,
+    );
+    let (code, text) = project.combined(&["ps"]);
+    assert_eq!(code, 3, "{text}");
+    has(&text, "===== CONFIG ERROR =====");
+    has(&text, "argv array");
+    has(&text, "[\"sh\", \"-c\",");
+
+    // The same service written as an array loads fine.
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = ["cargo", "run"]
+"#,
+    );
+    let (code, text) = project.combined(&["ps"]);
+    assert_eq!(code, 0, "{text}");
+}
+
+#[test]
 fn unknown_flags_and_missing_config_are_usage_or_config_errors() {
-    let project = Project::new("[[service]]\nname = \"a\"\nrun-cmd = \"true\"\n");
+    let project = Project::new("[[service]]\nname = \"a\"\nrun-cmd = [\"true\"]\n");
     let (code, _) = project.combined(&["--definitely-not-a-flag"]);
     assert_eq!(code, 2, "clap usage errors exit 2");
 

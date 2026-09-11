@@ -40,7 +40,8 @@ agproc stop                       # or: agproc stop backend
 ```
 
 `agproc start` (no service name) starts **every** service in parallel and prefixes each
-line with the service name (`backend | ...`); with a single service there is no prefix.
+line with the service name, padded to the longest one so the `|` columns line up
+(`backend  | ...` next to `frontend | ...`); with a single service there is no prefix.
 
 ## Commands
 
@@ -63,8 +64,9 @@ Flags worth knowing:
   of each stream. `-f` returns as soon as the service stops, so it never hangs.
 - Build output is shown live by `start`/`restart` but is not kept in the service logs. After a failed
   build, read it back from `.agproc/tmp/<service>.console.stdout` (the transient console stream).
-- stdout goes to agproc's stdout and stderr to agproc's stderr; with several services the
-  prefixes are `name | ` and `name stderr | `.
+- stdout goes to agproc's stdout and stderr to agproc's stderr; with several services every line
+  gets a `name | ` prefix (name padded to the longest one). Both streams share that prefix, so read
+  the stream — not the text — to tell them apart.
 
 ## Exit codes
 

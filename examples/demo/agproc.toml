@@ -13,8 +13,8 @@ stop-timeout-seconds = 5
 [[service]]
 name = "backend"
 cwd = "backend"
-build-cmd = "cargo build"
-run-cmd = "./target/debug/demo-backend 38080"
+build-cmd = ["cargo", "build"]
+run-cmd = ["./target/debug/demo-backend", "38080"]
 probe = {
   http-get = { scheme = "http", host = "127.0.0.1", port = 38080, path = "/healthz" },
   initial-delay-seconds = 1,
@@ -28,7 +28,7 @@ name = "frontend"
 cwd = "frontend"
 # Deliberately NOT a watching dev server: agproc restarts services explicitly,
 # so a non-watch server keeps every restart meaningful.
-run-cmd = "python3 -m http.server 38081 --bind 127.0.0.1"
+run-cmd = ["python3", "-m", "http.server", "38081", "--bind", "127.0.0.1"]
 probe = {
   tcp-connect = { host = "127.0.0.1", port = 38081 },
   initial-delay-seconds = 1,

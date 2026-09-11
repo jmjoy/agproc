@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::cli::Failure;
-use crate::cmd::{Prefix, select_services};
+use crate::cmd::{Prefix, prefix_width, select_services};
 use crate::config::Config;
 use crate::exit;
 use crate::logstore::{LineBuffer, LogFollower, LogRelay, emit};
@@ -55,17 +55,17 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
     if let Some(warning) = project.layout_warning() {
         Prefix::plain().marker(&format!("WARNING: {warning}"));
     }
-    let multi = services.len() > 1;
+    let width = prefix_width(services.iter().map(|service| service.name.as_str()));
 
     if request.follow {
         install_interrupt_handler();
-        follow(project, &services, &request, multi)?;
+        follow(project, &services, &request, width)?;
         return Ok(exit::OK);
     }
 
     let mut printed_anything = false;
     for service in &services {
-        let prefix = Prefix::service(&service.name, multi);
+        let prefix = Prefix::service(&service.name, width);
         let mut chunks: Vec<(bool, Vec<u8>)> = Vec::new();
         if matches!(request.stream, Stream::Both | Stream::Stdout) {
             let mut follower = LogFollower::new(project.log_stdout(&service.name));
@@ -94,11 +94,7 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
                     lines.drain(..lines.len() - tail);
                 }
             }
-            let prefix_text = if is_stderr {
-                prefix.err.clone()
-            } else {
-                prefix.out.clone()
-            };
+            let prefix_text = prefix.label.clone();
             for line in lines {
                 emit(is_stderr, &prefix_text, &line);
             }
@@ -115,16 +111,15 @@ fn follow(
     project: &Project,
     services: &[&crate::config::Service],
     request: &Request,
-    multi: bool,
+    width: Option<usize>,
 ) -> Result<(), Failure> {
     let mut relays: Vec<(String, LogRelay)> = Vec::new();
     for service in services {
-        let prefix = Prefix::service(&service.name, multi);
+        let prefix = Prefix::service(&service.name, width);
         let mut relay = LogRelay::new(
             project.log_stdout(&service.name),
             project.log_stderr(&service.name),
-            prefix.out.clone(),
-            prefix.err.clone(),
+            prefix.label.clone(),
         );
         relay.enable(
             !matches!(request.stream, Stream::Stderr),

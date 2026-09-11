@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde::de::{self, SeqAccess, Visitor};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::paths::Project;
@@ -14,8 +16,6 @@ use crate::util::fnv1a64;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
 pub struct Settings {
-    /// Shell used for the string form of `build-cmd` / `run-cmd`.
-    pub shell: String,
     /// Grace period between SIGTERM and SIGKILL on `stop`.
     pub stop_timeout_seconds: u64,
     /// Rotate a log file once it grows past this size (0 disables rotation).
@@ -27,7 +27,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            shell: "sh".to_string(),
             stop_timeout_seconds: 10,
             log_max_bytes: 32 * 1024 * 1024,
             port_check: true,
@@ -59,6 +58,7 @@ pub struct Service {
     /// 0 (the default) means no build timeout.
     #[serde(default)]
     pub build_timeout_seconds: Option<u64>,
+    /// argv array, executed directly (no shell).
     pub run_cmd: Cmd,
     /// Overrides `[settings] stop-timeout-seconds`.
     #[serde(default)]
@@ -67,28 +67,84 @@ pub struct Service {
     pub probe: Option<Probe>,
 }
 
-/// A command is either a shell string (`sh -c "..."`) or an argv array that is
-/// executed directly without a shell.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum Cmd {
-    Shell(String),
-    Argv(Vec<String>),
-}
+/// A command is an argv array — program first, arguments after — executed
+/// directly without a shell. Shell syntax (pipes, `&&`, redirections, globs,
+/// variables) needs an explicit shell: `["sh", "-c", "..."]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cmd(Vec<String>);
 
 impl Cmd {
-    pub fn argv(&self, shell: &str) -> Vec<String> {
-        match self {
-            Cmd::Shell(line) => vec![shell.to_string(), "-c".to_string(), line.clone()],
-            Cmd::Argv(argv) => argv.clone(),
-        }
+    pub fn argv(&self) -> &[String] {
+        &self.0
     }
 
+    /// The command as a TOML array literal, so what an agent reads in
+    /// `agproc skills` is exactly what belongs in the config: arguments with
+    /// spaces or shell metacharacters stay unambiguous.
     pub fn display(&self) -> String {
-        match self {
-            Cmd::Shell(line) => line.clone(),
-            Cmd::Argv(argv) => argv.join(" "),
+        let mut out = String::from("[");
+        for (index, arg) in self.0.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push('"');
+            for ch in arg.chars() {
+                match ch {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
         }
+        out.push(']');
+        out
+    }
+}
+
+impl<'de> Deserialize<'de> for Cmd {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CmdVisitor;
+
+        impl<'de> Visitor<'de> for CmdVisitor {
+            type Value = Cmd;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an array of strings, e.g. [\"cargo\", \"build\"]")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Cmd, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut argv = Vec::new();
+                while let Some(arg) = seq.next_element::<String>()? {
+                    argv.push(arg);
+                }
+                Ok(Cmd(argv))
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<Cmd, E>
+            where
+                E: de::Error,
+            {
+                // The string form used to run `<shell> -c "<value>"`; it is gone.
+                Err(E::custom(
+                    "commands are argv arrays, e.g. build-cmd = [\"cargo\", \"build\"]; \
+                     write [\"sh\", \"-c\", \"<command line>\"] if you need shell syntax \
+                     (the string form that ran `<shell> -c` was removed)",
+                ))
+            }
+        }
+
+        deserializer.deserialize_any(CmdVisitor)
     }
 }
 
@@ -314,20 +370,24 @@ fn validate_service(service: &Service) -> Result<()> {
     {
         bail!("service \"{name}\": name must not contain {bad:?} (allowed: letters, digits, '-', '_', '.')");
     }
-    if let Cmd::Argv(argv) = &service.run_cmd
-        && argv.is_empty()
-    {
-        bail!("service \"{name}\": run-cmd array must not be empty");
-    }
-    if let Some(Cmd::Argv(argv)) = &service.build_cmd
-        && argv.is_empty()
-    {
-        bail!("service \"{name}\": build-cmd array must not be empty");
+    validate_cmd(name, "run-cmd", &service.run_cmd)?;
+    if let Some(build_cmd) = &service.build_cmd {
+        validate_cmd(name, "build-cmd", build_cmd)?;
     }
     if let Some(probe) = &service.probe {
         validate_probe(name, probe)?;
     }
     Ok(())
+}
+
+fn validate_cmd(name: &str, key: &str, cmd: &Cmd) -> Result<()> {
+    match cmd.argv().first() {
+        None => bail!("service \"{name}\": {key} must not be empty"),
+        Some(program) if program.trim().is_empty() => {
+            bail!("service \"{name}\": {key} must start with a program name")
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 fn validate_probe(name: &str, probe: &Probe) -> Result<()> {
@@ -390,8 +450,8 @@ mod tests {
             r#"
 [[service]]
 name = "backend"
-build-cmd = "cargo build"
-run-cmd = "./target/debug/foo-backend"
+build-cmd = ["cargo", "build"]
+run-cmd = ["./target/debug/foo-backend"]
 probe = {
   http-get = { scheme = "http", host = "127.0.0.1", path = "/healthz", port = 3100 },
   initial-delay-seconds = 1,
@@ -403,7 +463,10 @@ probe = {
         )
         .unwrap();
         let service = config.service("backend").unwrap();
-        assert_eq!(service.build_cmd.as_ref().unwrap().display(), "cargo build");
+        assert_eq!(
+            service.build_cmd.as_ref().unwrap().display(),
+            r#"["cargo", "build"]"#
+        );
         assert_eq!(
             service.target().describe(),
             "http://127.0.0.1:3100/healthz"
@@ -420,7 +483,7 @@ probe = {
             r#"
 [[service]]
 name = "api"
-run-cmd = "sleep 1"
+run-cmd = ["sleep", "1"]
 probe = { tcp-connect = { port = 5432 } }
 "#,
         )
@@ -455,7 +518,7 @@ run_cmd = "true"
             r#"
 [[service]]
 name = "backend"
-run-cmd = "true"
+run-cmd = ["true"]
 probe = { tcp-connect = { port = 1, }, },
 "#,
         )
@@ -469,11 +532,11 @@ probe = { tcp-connect = { port = 1, }, },
             r#"
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 "#,
         )
         .unwrap_err();
@@ -498,7 +561,7 @@ name = "a"
             r#"
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 probe = { http-get = { port = 1 }, tcp-connect = { port = 2 } }
 "#,
         )
@@ -509,7 +572,7 @@ probe = { http-get = { port = 1 }, tcp-connect = { port = 2 } }
             r#"
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 probe = { period-seconds = 1 }
 "#,
         )
@@ -523,7 +586,7 @@ probe = { period-seconds = 1 }
             r#"
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 probe = { http-get = { scheme = "https", port = 443 } }
 "#,
         )
@@ -532,7 +595,7 @@ probe = { http-get = { scheme = "https", port = 443 } }
     }
 
     #[test]
-    fn argv_form_works_and_empty_argv_is_rejected() {
+    fn argv_is_the_only_form_and_empty_argv_is_rejected() {
         let config = parse(
             r#"
 [[service]]
@@ -542,8 +605,8 @@ run-cmd = ["cargo", "run", "--", "--flag"]
         )
         .unwrap();
         assert_eq!(
-            config.services[0].run_cmd.argv("sh"),
-            vec!["cargo", "run", "--", "--flag"]
+            config.services[0].run_cmd.argv(),
+            ["cargo", "run", "--", "--flag"]
         );
 
         let err = parse(
@@ -555,6 +618,42 @@ run-cmd = []
         )
         .unwrap_err();
         assert!(err.to_string().contains("empty"), "{err}");
+
+        let blank = parse(
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["", "arg"]
+"#,
+        )
+        .unwrap_err();
+        assert!(blank.to_string().contains("program name"), "{blank}");
+    }
+
+    #[test]
+    fn string_form_is_rejected_with_a_hint() {
+        let err = parse(
+            r#"
+[[service]]
+name = "a"
+run-cmd = "cargo run"
+"#,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("argv array"), "{text}");
+        assert!(text.contains("[\"sh\", \"-c\""), "{text}");
+
+        let build = parse(
+            r#"
+[[service]]
+name = "a"
+build-cmd = "cargo build"
+run-cmd = ["true"]
+"#,
+        )
+        .unwrap_err();
+        assert!(build.to_string().contains("argv array"), "{build}");
     }
 
     #[test]
@@ -566,14 +665,43 @@ stop-timeout-seconds = 3
 
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 "#,
         )
         .unwrap();
         assert_eq!(config.settings.stop_timeout_seconds, 3);
-        assert_eq!(config.settings.shell, "sh");
         assert!(config.settings.port_check);
         assert_eq!(config.settings.log_max_bytes, 32 * 1024 * 1024);
+
+        // The shell setting only existed for the removed string form.
+        let err = parse(
+            r#"
+[settings]
+shell = "sh"
+
+[[service]]
+name = "a"
+run-cmd = ["true"]
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("shell"), "{err}");
+    }
+
+    #[test]
+    fn display_renders_a_toml_array_literal() {
+        let config = parse(
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["sh", "-c", "echo \"hi\" > out; sleep 1"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.services[0].run_cmd.display(),
+            r#"["sh", "-c", "echo \"hi\" > out; sleep 1"]"#
+        );
     }
 
     #[test]
@@ -582,7 +710,7 @@ run-cmd = "true"
             r#"
 [[service]]
 name = "a"
-run-cmd = "true"
+run-cmd = ["true"]
 probe = { http-get = { host = "example.com", port = 80 } }
 "#,
         )
