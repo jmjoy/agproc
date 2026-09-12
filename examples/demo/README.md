@@ -19,6 +19,12 @@ agproc stop                  # nothing left running
 Watch the exit codes: `start` returns 4 for a build failure, 5 when the process
 dies before the probe passed, 6 when the probe fails.
 
+The backend service loads `env-file = ".env"`, a path relative to the project
+root — hence `examples/demo/.env`, not `examples/demo/backend/.env`. Its
+`DEMO_GREETING` shows up in the startup log as `demo-backend greeting: ...`.
+Edit that file and `agproc ps` reports `config changed since start`; run
+`agproc restart backend` to apply it.
+
 > This demo lives in the Git repository only. It contains a nested crate
 > (`backend/`), which cargo never packages, so the published `agproc` crate
 > excludes `examples/` entirely rather than shipping a demo without its backend.

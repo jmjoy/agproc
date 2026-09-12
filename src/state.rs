@@ -32,6 +32,9 @@ pub enum Phase {
     Exited,
     /// The probe hit its failure threshold; the child was stopped.
     ProbeFailed,
+    /// The configuration could not be applied (an unreadable or unparsable
+    /// `env-file`); nothing was started.
+    ConfigFailed,
     /// Stopped by `agproc stop` (or while building).
     Stopped,
     /// The runner disappeared without recording an outcome (`kill -9`).
@@ -49,6 +52,7 @@ impl Phase {
             Phase::RunFailed => "run-failed",
             Phase::Exited => "exited",
             Phase::ProbeFailed => "probe-failed",
+            Phase::ConfigFailed => "config-failed",
             Phase::Stopped => "stopped",
             Phase::Stale => "stale",
         }
@@ -64,6 +68,7 @@ impl Phase {
             Phase::RunFailed => "run failed",
             Phase::Exited => "running failed",
             Phase::ProbeFailed => "probe failed",
+            Phase::ConfigFailed => "config failed",
             Phase::Stopped => "stopped",
             Phase::Stale => "stale",
         }
@@ -78,6 +83,7 @@ impl Phase {
                 | Phase::RunFailed
                 | Phase::Exited
                 | Phase::ProbeFailed
+                | Phase::ConfigFailed
                 | Phase::Stopped
                 | Phase::Stale
         )
@@ -90,6 +96,7 @@ impl Phase {
             Phase::BuildFailed => crate::exit::BUILD_FAILED,
             Phase::RunFailed | Phase::Exited | Phase::Stale => crate::exit::RUN_FAILED,
             Phase::ProbeFailed => crate::exit::PROBE_FAILED,
+            Phase::ConfigFailed => crate::exit::CONFIG,
             Phase::Stopped => crate::exit::SUPERSEDED,
             Phase::Building | Phase::Starting => crate::exit::GENERIC,
         }
@@ -341,6 +348,7 @@ mod tests {
         assert_eq!(Phase::RunFailed.start_exit_code(), 5);
         assert_eq!(Phase::Exited.start_exit_code(), 5);
         assert_eq!(Phase::ProbeFailed.start_exit_code(), 6);
+        assert_eq!(Phase::ConfigFailed.start_exit_code(), 3);
         assert_eq!(Phase::Stopped.start_exit_code(), 8);
     }
 }

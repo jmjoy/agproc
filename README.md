@@ -97,6 +97,7 @@ port-check = true                 # port preflight + ownership verification
 name = "backend"                  # required, unique, [A-Za-z0-9._-]
 cwd = "."                         # optional, relative to the project root
 env = { RUST_LOG = "debug" }      # optional, merged into the inherited environment
+env-file = ".env"                 # optional, KEY=VALUE pairs, relative to the project root
 build-cmd = ["cargo", "build"]    # optional; without it the BUILD phase is skipped
 build-timeout-seconds = 0         # optional; 0 = no limit
 run-cmd = ["./target/debug/api"]  # required; argv array, executed directly (no shell)
@@ -130,6 +131,16 @@ Rules:
   `[settings] shell` key are gone; a string is rejected at load time (exit 3) with the fix in the message.
 - `http-get` supports `http` only (local dev endpoints); `https` fails at load time. `2xx/3xx` count
   as ready.
+- `env-file` loads `KEY=VALUE` pairs into **both** `build-cmd` and `run-cmd`, with standard dotenv
+  syntax: comments, `export KEY=VALUE`, single/double quotes, and `$VAR` / `${VAR}` substitution
+  (note that a value with spaces or `#` must be quoted: `GREETING="hello world"`).
+  The path is **relative to the project root** (like `cwd`; no `~` expansion), and the file is read
+  once when the service starts, so editing it needs `agproc restart`. Precedence is
+  `env` > `env-file` > the inherited environment. A key declared twice in one file is rejected.
+  A file that is missing or unparsable fails the start with phase `config failed` and **exit 3** —
+  `agproc ps` shows the phase and the reason stays in `.agproc/tmp/<service>.console.stdout`.
+  The contents are part of the config fingerprint, so after editing the file `ps` reports
+  `[config changed since start]` and `start` tells you to restart.
 - Multiple services are started **in parallel**.
 
 ## Log conventions
@@ -145,6 +156,7 @@ Everything agproc says itself looks like `===== LIKE THIS =====`:
 ===== PROBE PASSED (attempt 2) =====
 ===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code 1) =====
+===== CONFIG FAILED (service "backend": cannot read env-file /repo/.env: No such file or directory (os error 2)) =====
 ===== SERVICE EXITED (exit code 0, ready for 12s) =====
 ===== STOPPED =====
 ===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
@@ -176,7 +188,7 @@ frontend | ===== PROBE PASSED =====
 | 0 | success: ready / already running / stopped / ps / logs / skills |
 | 1 | generic error, including "the CLI gave up waiting" |
 | 2 | usage error |
-| 3 | configuration error (missing or invalid `agproc.toml`, unknown service name) |
+| 3 | configuration error (missing or invalid `agproc.toml`, unknown service name, unreadable or unparsable `env-file`) |
 | 4 | build failed (non-zero exit or timeout) |
 | 5 | run failed (the process exited before the probe passed) |
 | 6 | probe failed |
@@ -186,8 +198,9 @@ frontend | ===== PROBE PASSED =====
 ## States (`agproc ps`)
 
 `building`, `starting` (running, not yet ready), `running`, `build failed`, `run failed`,
-`running failed` (exited after being ready), `probe failed`, `stopped`, and
-`stale` (the runner was `kill -9`ed; the next `start` reaps the leftover process group and rebuilds).
+`running failed` (exited after being ready), `probe failed`, `config failed` (an `env-file` could not
+be read or parsed, so nothing was started), `stopped`, and `stale` (the runner was `kill -9`ed; the
+next `start` reaps the leftover process group and rebuilds).
 
 `agproc ps --json` emits a stable shape (`phase` / `pid` / `runner_pid` / `child_pid` /
 `uptime_seconds` / `build_exit_code` / `run_exit_code` / `probe{kind,target,attempts,last_error}` /

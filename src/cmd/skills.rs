@@ -28,6 +28,8 @@ struct ServiceInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     build_cmd: Option<Vec<String>>,
     run_cmd: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env_file: Option<String>,
     probe_kind: String,
     probe_target: String,
     cwd: String,
@@ -126,6 +128,9 @@ fn service_infos(project: &Project, config: &Config) -> Vec<ServiceInfo> {
             name: service.name.clone(),
             build_cmd: service.build_cmd.as_ref().map(|cmd| cmd.argv().to_vec()),
             run_cmd: service.run_cmd.argv().to_vec(),
+            env_file: service
+                .env_file_path(project)
+                .map(|path| path.display().to_string()),
             probe_kind: service.target().kind_str().to_string(),
             probe_target: service.target().describe(),
             cwd: service.cwd_path(project).display().to_string(),
@@ -202,19 +207,28 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
         ));
     }
 
-    let mut settings = String::new();
+    let mut notes = String::new();
+    for service in &loaded.config.services {
+        if let Some(path) = service.env_file_path(project) {
+            notes.push_str(&format!(
+                "- service `{}` loads an env-file `{}` (explicit `env` entries win; `agproc restart` re-reads it)\n",
+                service.name,
+                path.display()
+            ));
+        }
+    }
     if loaded.config.settings.log_max_bytes > 0 {
-        settings.push_str(&format!(
+        notes.push_str(&format!(
             "- log files rotate into `<name>.1` past {} MiB\n",
             loaded.config.settings.log_max_bytes / (1024 * 1024)
         ));
     }
     if !loaded.config.settings.port_check {
-        settings.push_str("- port ownership checks are disabled in `[settings] port-check = false`\n");
+        notes.push_str("- port ownership checks are disabled in `[settings] port-check = false`\n");
     }
-    if !settings.is_empty() {
+    if !notes.is_empty() {
         out.push_str("\nNotes:\n");
-        out.push_str(&settings);
+        out.push_str(&notes);
     }
     out
 }
@@ -288,5 +302,27 @@ probe = { tcp-connect = { port = 5173 } }
         assert_eq!(infos[0].build_cmd, None);
         assert_eq!(infos[0].probe_kind, "none");
         assert!(infos[0].log_stdout.ends_with("api.stdout.log"));
+        // A service without an env-file carries no `env_file` key at all.
+        assert_eq!(infos[0].env_file, None);
+    }
+
+    #[test]
+    fn env_files_are_reported_in_the_json_and_the_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with(
+            dir.path(),
+            "[[service]]\nname = \"api\"\nrun-cmd = [\"sleep\", \"1\"]\nenv-file = \"config/dev.env\"\n",
+        );
+        let loaded = crate::config::load(&project.config_path).unwrap();
+
+        let infos = service_infos(&project, &loaded.config);
+        assert_eq!(
+            infos[0].env_file.as_deref(),
+            Some(dir.path().join("config/dev.env").display().to_string().as_str())
+        );
+
+        let section = project_section(&project, &loaded);
+        assert!(section.contains("loads an env-file"), "{section}");
+        assert!(section.contains("config/dev.env"), "{section}");
     }
 }

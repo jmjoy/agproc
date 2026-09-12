@@ -83,6 +83,7 @@ fn render(root: &Path) -> String {
              name = \"backend\"\n\
              build-cmd = [\"cargo\", \"build\"]\n\
              run-cmd = [\"./target/debug/{name}\"]\n\
+             # env-file = \".env\"                # optional: KEY=VALUE pairs, relative to the project root\n\
              probe = {{\n\
              \x20 http-get = {{ scheme = \"http\", host = \"127.0.0.1\", port = 3000, path = \"/healthz\" }},\n\
              \x20 initial-delay-seconds = 1,\n\
@@ -96,6 +97,7 @@ fn render(root: &Path) -> String {
              # name = \"backend\"\n\
              # build-cmd = [\"cargo\", \"build\"]\n\
              # run-cmd = [\"./target/debug/my-backend\"]\n\
+             # env-file = \".env\"                # optional: KEY=VALUE pairs, relative to the project root\n\
              # probe = { http-get = { port = 3000, path = \"/healthz\" },\n\
              #                     initial-delay-seconds = 1, period-seconds = 1,\n\
              #                     timeout-seconds = 2, failure-threshold = 3 }\n\n",

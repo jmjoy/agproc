@@ -3,6 +3,7 @@
 mod cli;
 mod cmd;
 mod config;
+mod envfile;
 mod exit;
 mod lock;
 mod logstore;

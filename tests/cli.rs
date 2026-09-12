@@ -1026,3 +1026,158 @@ fn unknown_flags_and_missing_config_are_usage_or_config_errors() {
     let text = String::from_utf8_lossy(&output.stderr);
     has(&text, "agproc.toml");
 }
+
+// ---------------------------------------------------------------------------
+// env-file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn env_file_feeds_build_and_run() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+env-file = ".env"
+build-cmd = ["sh", "-c", "echo build-sees-$FROM_FILE"]
+run-cmd = ["sh", "-c", "echo run-sees-$FROM_FILE; sleep 120"]
+"#,
+    );
+    project.write(".env", "# loaded by agproc\nFROM_FILE=hello\n");
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "start with an env-file failed:\n{text}");
+    // The env-file reaches the build phase and the run phase alike.
+    has(&text, "build-sees-hello");
+    has(&text, "run-sees-hello");
+
+    let (code, text) = project.combined(&["logs", "api"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "run-sees-hello");
+
+    let _ = project.agproc(&["stop"]);
+}
+
+#[test]
+fn env_file_is_relative_to_the_project_root_and_env_wins() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+cwd = "sub"
+env-file = "sub/.env"
+env = { WHO = "inline" }
+run-cmd = ["sh", "-c", "echo who-$WHO; echo from-$FROM_FILE; sleep 120"]
+"#,
+    );
+    std::fs::create_dir_all(project.file("sub")).expect("create cwd");
+    // Root-relative, not `sub/.env` as seen from `cwd = "sub"`.
+    project.write("sub/.env", "WHO=file\nFROM_FILE=sub-env\n");
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    // The `env` table overrides the file, which overrides the inherited environment.
+    has(&text, "who-inline");
+    has(&text, "from-sub-env");
+
+    let _ = project.agproc(&["stop"]);
+}
+
+#[test]
+fn a_missing_env_file_is_a_config_error() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+env-file = "config/dev.env"
+run-cmd = ["sleep", "120"]
+"#,
+    );
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(
+        code, 3,
+        "a missing env-file must be a configuration error:\n{text}"
+    );
+    has(&text, "===== CONFIG FAILED");
+    has(&text, "cannot read env-file");
+    has(&text, "config/dev.env");
+    has(&text, "===== START FAILED: api (configuration error");
+    // Nothing was started, and the failure is visible in ps.
+    assert_eq!(project.state("api")["phase"], "config-failed");
+    assert!(project.state("api")["child-pid"].is_null(), "{text}");
+
+    let (code, text) = project.combined(&["ps"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "config failed");
+    let ps = project.ps_json();
+    assert_eq!(ps["services"][0]["phase"], "config-failed", "{ps}");
+
+    // The console stream keeps the reason, as it does for a failed build.
+    let console = project.read(".agproc/tmp/api.console.stdout");
+    has(&console, "cannot read env-file");
+}
+
+#[test]
+fn an_unparsable_env_file_is_a_config_error() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+env-file = ".env"
+run-cmd = ["sleep", "120"]
+"#,
+    );
+    project.write(".env", "THIS IS NOT A KEY=VALUE LINE\n");
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 3, "{text}");
+    has(&text, "===== CONFIG FAILED");
+    has(&text, "cannot parse env-file");
+    assert_eq!(project.state("api")["phase"], "config-failed");
+
+    // A duplicate key is just as loud: one of the two lines would be a silent lie.
+    project.write(".env", "PORT=1\nPORT=2\n");
+    let (code, text) = project.combined(&["restart", "api"]);
+    assert_eq!(code, 3, "{text}");
+    has(&text, "declared more than once");
+    has(&text, "PORT");
+}
+
+#[test]
+fn editing_an_env_file_marks_the_config_changed() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+env-file = ".env"
+run-cmd = ["sh", "-c", "echo value-$FROM_FILE; sleep 120"]
+"#,
+    );
+    project.write(".env", "FROM_FILE=first\n");
+
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "value-first");
+    assert_eq!(project.ps_json()["services"][0]["config_changed"], false);
+
+    project.write(".env", "FROM_FILE=second\n");
+    let ps = project.ps_json();
+    assert_eq!(
+        ps["services"][0]["config_changed"], true,
+        "editing an env-file must count as a config change: {ps}"
+    );
+
+    // `start` stays idempotent, but it now points at the stale environment.
+    let (code, text) = project.combined(&["start", "api"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "===== ALREADY RUNNING");
+    has(&text, "CONFIG CHANGED SINCE START");
+
+    // Restarting is what applies the new values.
+    let (code, text) = project.combined(&["restart", "api"]);
+    assert_eq!(code, 0, "{text}");
+    has(&text, "value-second");
+    assert_eq!(project.ps_json()["services"][0]["config_changed"], false);
+
+    let _ = project.agproc(&["stop"]);
+}

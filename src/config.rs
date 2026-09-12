@@ -52,6 +52,11 @@ pub struct Service {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Optional dotenv file (relative to the project root) whose `KEY=VALUE`
+    /// pairs join the environment of both `build-cmd` and `run-cmd`; `env` wins
+    /// over it.
+    #[serde(default)]
+    pub env_file: Option<String>,
     /// Omitted means "no build step"; the RUNNING phase starts directly.
     #[serde(default)]
     pub build_cmd: Option<Cmd>,
@@ -307,6 +312,28 @@ impl Service {
             None => project.root.clone(),
         }
     }
+
+    /// The env-file resolved against the project root (an absolute path stays as
+    /// it is). The file is read by the runner at session start, so editing it
+    /// takes effect on the next `agproc restart`.
+    pub fn env_file_path(&self, project: &Project) -> Option<PathBuf> {
+        self.env_file.as_ref().map(|file| project.root.join(file))
+    }
+
+    /// The environment the service's children actually get: the env-file first,
+    /// then the `env` table on top of it. Everything else is inherited from the
+    /// runner through `Command`, which is why only these two sources are listed.
+    pub fn spawn_env(&self, project: &Project) -> Result<BTreeMap<String, String>> {
+        let mut env = BTreeMap::new();
+        if let Some(path) = self.env_file_path(project) {
+            env = crate::envfile::load(&path)
+                .with_context(|| format!("service \"{}\"", self.name))?;
+        }
+        for (key, value) in &self.env {
+            env.insert(key.clone(), value.clone());
+        }
+        Ok(env)
+    }
 }
 
 impl Config {
@@ -322,20 +349,50 @@ impl Config {
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub config: Config,
-    /// Fingerprint of the raw file, stored in state so `ps` can tell that a
-    /// running service was started from an older revision of the config.
+    /// Fingerprint of the raw file plus every `env-file` it references, stored in
+    /// state so `ps` can tell that a running service was started from an older
+    /// revision of the configuration.
     pub hash: String,
 }
 
 pub fn load(path: &Path) -> Result<LoadedConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read config {}", path.display()))?;
-    let hash = format!("fnv1a64:{:016x}", fnv1a64(raw.as_bytes()));
     let config: Config = toml::from_str(&raw)
         .map_err(|err| anyhow::anyhow!("{}\n{}", path.display(), err))
         .context("invalid agproc.toml")?;
     validate(&config).with_context(|| format!("invalid config {}", path.display()))?;
+    let hash = fingerprint(path, &raw, &config);
     Ok(LoadedConfig { config, hash })
+}
+
+/// The configuration revision: the raw `agproc.toml` plus, for every service that
+/// declares one, its `env-file` (a null separator, the service name, the resolved
+/// path and the bytes; unreadable files contribute a fixed marker).
+///
+/// Editing a `.env` therefore shows up exactly like editing `agproc.toml`, which
+/// is what tells `ps` and `start` to say "config changed since start". Reading the
+/// file must never fail here: `ps`, `logs` and `stop` have to keep working while
+/// the runner is the one that refuses to start.
+fn fingerprint(config_path: &Path, raw: &str, config: &Config) -> String {
+    let root = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut buffer = Vec::from(raw.as_bytes());
+    for service in &config.services {
+        let Some(file) = &service.env_file else {
+            continue;
+        };
+        let path = root.join(file);
+        buffer.push(0);
+        buffer.extend_from_slice(service.name.as_bytes());
+        buffer.push(0);
+        buffer.extend_from_slice(path.as_os_str().as_encoded_bytes());
+        buffer.push(0);
+        match std::fs::read(&path) {
+            Ok(bytes) => buffer.extend_from_slice(&bytes),
+            Err(_) => buffer.extend_from_slice(b"<unreadable>"),
+        }
+    }
+    format!("fnv1a64:{:016x}", fnv1a64(&buffer))
 }
 
 fn validate(config: &Config) -> Result<()> {
@@ -373,6 +430,13 @@ fn validate_service(service: &Service) -> Result<()> {
     validate_cmd(name, "run-cmd", &service.run_cmd)?;
     if let Some(build_cmd) = &service.build_cmd {
         validate_cmd(name, "build-cmd", build_cmd)?;
+    }
+    if let Some(file) = &service.env_file
+        && file.trim().is_empty()
+    {
+        bail!(
+            "service \"{name}\": env-file must not be empty (remove the key when the service needs no env file)"
+        );
     }
     if let Some(probe) = &service.probe {
         validate_probe(name, probe)?;
@@ -716,5 +780,209 @@ probe = { http-get = { host = "example.com", port = 80 } }
         )
         .unwrap();
         assert_eq!(config.services[0].target().local_port(), None);
+    }
+
+    // ------------------------------------------------------------- env-file
+
+    /// A project on disk, so `env-file` can actually be read.
+    fn project_with(dir: &Path, config: &str) -> Project {
+        let path = dir.join("agproc.toml");
+        std::fs::write(&path, config).unwrap();
+        Project {
+            root: dir.to_path_buf(),
+            config_path: path,
+        }
+    }
+
+    fn write(dir: &Path, relative: &str, body: &str) {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn env_file_name_is_kebab_case() {
+        let err = parse(
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["true"]
+env_file = ".env"
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("env_file"), "{err}");
+    }
+
+    #[test]
+    fn env_file_must_not_be_empty() {
+        let err = parse(
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["true"]
+env-file = "  "
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("env-file"), "{err}");
+    }
+
+    #[test]
+    fn env_file_path_is_relative_to_the_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with(
+            dir.path(),
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["true"]
+env-file = "config/dev.env"
+"#,
+        );
+        let loaded = load(&project.config_path).unwrap();
+        let service = loaded.config.service("a").unwrap();
+        assert_eq!(
+            service.env_file_path(&project).unwrap(),
+            dir.path().join("config/dev.env")
+        );
+
+        // An absolute path is used as it is.
+        let absolute = dir.path().join("absolute.env");
+        let project = project_with(
+            dir.path(),
+            &format!(
+                "[[service]]\nname = \"a\"\nrun-cmd = [\"true\"]\nenv-file = \"{}\"\n",
+                absolute.display()
+            ),
+        );
+        let loaded = load(&project.config_path).unwrap();
+        assert_eq!(
+            loaded.config.service("a").unwrap().env_file_path(&project),
+            Some(absolute)
+        );
+    }
+
+    #[test]
+    fn spawn_env_merges_the_file_under_the_env_table() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            ".env",
+            "# from the file\nFROM_FILE=file\nWHO=file\nPORT=\"5432\"\n",
+        );
+        let project = project_with(
+            dir.path(),
+            r#"
+[[service]]
+name = "backend"
+run-cmd = ["true"]
+env-file = ".env"
+env = { WHO = "inline", ONLY_INLINE = "yes" }
+"#,
+        );
+        let loaded = load(&project.config_path).unwrap();
+        let env = loaded
+            .config
+            .service("backend")
+            .unwrap()
+            .spawn_env(&project)
+            .unwrap();
+        assert_eq!(env["FROM_FILE"], "file");
+        assert_eq!(env["PORT"], "5432");
+        // The explicit table wins over the file.
+        assert_eq!(env["WHO"], "inline");
+        assert_eq!(env["ONLY_INLINE"], "yes");
+        assert_eq!(env.len(), 4);
+    }
+
+    #[test]
+    fn spawn_env_without_an_env_file_is_just_the_env_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with(
+            dir.path(),
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["true"]
+env = { A = "1" }
+"#,
+        );
+        let loaded = load(&project.config_path).unwrap();
+        let env = loaded
+            .config
+            .service("a")
+            .unwrap()
+            .spawn_env(&project)
+            .unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env["A"], "1");
+    }
+
+    #[test]
+    fn a_missing_env_file_names_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with(
+            dir.path(),
+            r#"
+[[service]]
+name = "backend"
+run-cmd = ["true"]
+env-file = "config/dev.env"
+"#,
+        );
+        let loaded = load(&project.config_path).unwrap();
+        // Loading the config itself must keep working: `ps` and `stop` still need it.
+        let err = loaded
+            .config
+            .service("backend")
+            .unwrap()
+            .spawn_env(&project)
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("service \"backend\""), "{text}");
+        assert!(text.contains("cannot read env-file"), "{text}");
+        assert!(
+            text.contains(&dir.path().join("config/dev.env").display().to_string()),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_tracks_env_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_with(
+            dir.path(),
+            r#"
+[[service]]
+name = "a"
+run-cmd = ["true"]
+env-file = ".env"
+"#,
+        );
+        write(dir.path(), ".env", "A=1\n");
+        let first = load(&project.config_path).unwrap().hash;
+
+        // Same bytes: same revision.
+        assert_eq!(load(&project.config_path).unwrap().hash, first);
+
+        write(dir.path(), ".env", "A=2\n");
+        let edited = load(&project.config_path).unwrap().hash;
+        assert_ne!(edited, first, "editing .env must change the fingerprint");
+
+        std::fs::remove_file(dir.path().join(".env")).unwrap();
+        let deleted = load(&project.config_path).unwrap().hash;
+        assert_ne!(deleted, edited, "deleting .env must change the fingerprint");
+
+        // A service without env-file keeps the plain config fingerprint.
+        let plain = project_with(
+            dir.path(),
+            "[[service]]\nname = \"a\"\nrun-cmd = [\"true\"]\n",
+        );
+        let first_plain = load(&plain.config_path).unwrap().hash;
+        assert_eq!(load(&plain.config_path).unwrap().hash, first_plain);
+        assert_ne!(first_plain, first);
     }
 }

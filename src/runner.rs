@@ -170,6 +170,19 @@ fn inner(args: Args) -> Result<i32> {
         sink,
         state,
     };
+
+    // The env-file is read once per session, before anything is published: both
+    // the build and the run phase see the same snapshot, and a file that cannot
+    // be read settles the session as a configuration failure instead of looking
+    // like a build or run problem.
+    let cwd = session.service.cwd_path(&session.project);
+    let env = match session.service.spawn_env(&session.project) {
+        Ok(env) => env,
+        Err(err) => {
+            return session.finish(Phase::ConfigFailed, &format!("CONFIG FAILED ({err:#})"));
+        }
+    };
+
     session.state.phase = if session.service.build_cmd.is_some() {
         Phase::Building
     } else {
@@ -177,8 +190,6 @@ fn inner(args: Args) -> Result<i32> {
     };
     session.publish()?;
 
-    let cwd = session.service.cwd_path(&session.project);
-    let env = session.service.env.clone();
     let stop_timeout = session.stop_timeout();
 
     // ---------------------------------------------------------------- build

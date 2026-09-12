@@ -14,6 +14,12 @@ fn main() {
     println!("demo-backend listening on http://127.0.0.1:{port}");
     eprintln!("demo-backend: ready for requests");
 
+    // Comes from `env-file = ".env"` in examples/demo/agproc.toml: proof that the
+    // file reaches the run-cmd environment, not just the shell you started it from.
+    let greeting =
+        std::env::var("DEMO_GREETING").unwrap_or_else(|_| "(DEMO_GREETING unset)".to_string());
+    println!("demo-backend greeting: {greeting}");
+
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind 127.0.0.1");
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };

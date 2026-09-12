@@ -95,6 +95,7 @@ agproc's own lines always look like `===== LIKE THIS =====`:
 ===== PROBE PASSED (attempt 2) =====
 ===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code N) =====    run-cmd died before the probe passed
+===== CONFIG FAILED (service "backend": cannot read env-file /repo/.env: ...) =====
 ===== SERVICE EXITED (exit code N, ready for 12s) =====   it ran, then stopped
 ===== STOPPED =====
 ===== ALREADY RUNNING (pid N, uptime 2m3s, ready) =====
@@ -106,7 +107,8 @@ agproc's own lines always look like `===== LIKE THIS =====`:
 ## Service phases (`agproc ps`)
 
 `building`, `starting` (running, not yet ready), `running`, `build failed`, `run failed`,
-`running failed` (it was ready and then exited), `probe failed`, `stopped`,
+`running failed` (it was ready and then exited), `probe failed`, `config failed` (an `env-file`
+could not be read or parsed, so nothing was started), `stopped`,
 `stale` (the supervisor was killed; the next `start` reaps the leftovers and rebuilds).
 
 ## Troubleshooting
@@ -120,6 +122,10 @@ agproc's own lines always look like `===== LIKE THIS =====`:
   success against someone else's process. Free the port (or change it in `agproc.toml`).
 - **exit 7** — a start/restart is already running for that service. Wait for it, or
   `agproc stop <service>` first; do not fire a second `start` in a loop.
+- **`config failed`** — the service declares an `env-file` (a `.env`-style file) that could not be
+  read or parsed; nothing was started. The `CONFIG FAILED` line on the console names the file, and
+  the detail is kept in `.agproc/tmp/<service>.console.stdout`. Fix the file (or the `env-file`
+  path, which is relative to the project root) and run `agproc restart <service>`.
 - **`stale`** — the supervisor process was killed. Run `agproc start <service>`: it kills
   the leftover process group and builds again.
 - **Build output missing?** Most build tools write progress to stderr, which agproc keeps
@@ -131,6 +137,9 @@ agproc's own lines always look like `===== LIKE THIS =====`:
 - Starting services yourself and then wondering why `agproc ps` does not list them.
 - Editing `agproc.toml` and expecting a running service to pick it up: `ps` marks
   `[config changed since start]`; run `agproc restart <service>`.
+- Editing the `.env` behind a service's `env-file` and expecting it to apply: environment
+  variables are read when the service starts, so `agproc restart <service>` is required (and
+  `ps` reports `config changed since start` after such an edit).
 - Busy-looping on `agproc ps` right after `start`: `start` already waits for the probe.
 
 <!-- agproc:project -->

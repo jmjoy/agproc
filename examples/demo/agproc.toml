@@ -13,6 +13,9 @@ stop-timeout-seconds = 5
 [[service]]
 name = "backend"
 cwd = "backend"
+# Paths are relative to the project root (the directory holding agproc.toml),
+# not to `cwd`; the file feeds both build-cmd and run-cmd.
+env-file = ".env"
 build-cmd = ["cargo", "build"]
 run-cmd = ["./target/debug/demo-backend", "38080"]
 probe = {

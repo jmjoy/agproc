@@ -166,6 +166,10 @@ fn row_for(
             Some(err) => format!("{} {}: {err}", state.probe.kind, target.describe()),
             None => format!("{} {} never became ready", state.probe.kind, target.describe()),
         },
+        Phase::ConfigFailed => format!(
+            "configuration error (see .agproc/tmp/{}.console.stdout)",
+            state.service
+        ),
         Phase::Stopped => "stopped".to_string(),
         Phase::Stale => format!(
             "runner {} disappeared without recording an outcome",

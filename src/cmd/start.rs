@@ -352,6 +352,10 @@ fn settle(state: &State) -> Result<Started, Failed> {
         Phase::ProbeFailed => {
             Err(Failed::new(exit::PROBE_FAILED, "probe failed"))
         }
+        Phase::ConfigFailed => Err(Failed::new(
+            exit::CONFIG,
+            "configuration error (see the CONFIG FAILED marker)",
+        )),
         Phase::Stopped => Err(Failed::new(
             exit::SUPERSEDED,
             "stopped by another agproc invocation",

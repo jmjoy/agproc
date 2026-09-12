@@ -91,6 +91,7 @@ port-check = true                 # 端口预检 + 归属校验
 name = "backend"                  # 必填，唯一，[A-Za-z0-9._-]
 cwd = "."                         # 可选，相对项目根
 env = { RUST_LOG = "debug" }      # 可选，合并进继承的环境
+env-file = ".env"                 # 可选，KEY=VALUE 文件，相对项目根
 build-cmd = ["cargo", "build"]    # 可选；省略则跳过 BUILD 阶段
 build-timeout-seconds = 0         # 可选；0 = 不限
 run-cmd = ["./target/debug/api"]  # 必填；argv 数组，直接 exec（不经 shell）
@@ -122,6 +123,13 @@ probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
   `<shell> -c "..."`）与 `[settings] shell` 已移除：字符串在加载阶段就报错（退出码 3），
   错误信息里直接给出改法。
 - `http-get` 仅支持 `http`（本地开发端点），`https` 会在加载时报错；`2xx/3xx` 视为通过。
+- `env-file` 按标准 dotenv 语法（注释、`export KEY=VALUE`、单/双引号、`$VAR` / `${VAR}` 替换）
+  读取 `KEY=VALUE`，同时注入 **build-cmd 与 run-cmd**（含空格或 `#` 的值必须加引号：
+  `GREETING="hello world"`）。路径**相对项目根**（与 `cwd` 一致，不做 `~` 展开），
+  文件在服务启动时读一次，改动后需要 `agproc restart`。优先级为 `env` > `env-file` > 继承的环境变量；
+  同一文件里重复声明同一个 key 会被拒绝。文件缺失或解析失败时启动失败，阶段 `config failed`、**退出码 3**，
+  `agproc ps` 会显示该阶段，原因留在 `.agproc/tmp/<service>.console.stdout`。文件内容计入配置指纹，
+  改动后 `ps` 会显示 `[config changed since start]`、`start` 会提示需要重启。
 - 多个 service 会**并行**启动。
 
 ## 日志约定
@@ -137,6 +145,7 @@ agproc 自己的日志统一是 `===== XXX =====`：
 ===== PROBE PASSED (attempt 2) =====
 ===== PROBE FAILED: 3 consecutive failures, last: ... =====
 ===== RUNNING FAILED (exit code 1) =====
+===== CONFIG FAILED (service "backend": cannot read env-file /repo/.env: No such file or directory (os error 2)) =====
 ===== SERVICE EXITED (exit code 0, ready for 12s) =====
 ===== STOPPED =====
 ===== ALREADY RUNNING (pid 1234, uptime 2m3s, ready) =====
@@ -166,7 +175,7 @@ frontend | ===== PROBE PASSED =====
 | 0 | 成功：就绪 / already running / stop 成功 / ps / logs / skills |
 | 1 | 通用错误（含命令等待超时） |
 | 2 | 用法错误 |
-| 3 | 配置错误（找不到或非法 `agproc.toml`、未知 service 名） |
+| 3 | 配置错误（找不到或非法 `agproc.toml`、未知 service 名、`env-file` 缺失或解析失败） |
 | 4 | build 失败（非零退出或超时） |
 | 5 | run 失败（就绪前退出） |
 | 6 | 探针失败 |
@@ -176,7 +185,8 @@ frontend | ===== PROBE PASSED =====
 ## 状态（`agproc ps`）
 
 `building`、`starting`（已运行未就绪）、`running`、`build failed`、`run failed`、
-`running failed`（就绪后又退出）、`probe failed`、`stopped`、
+`running failed`（就绪后又退出）、`probe failed`、`config failed`（`env-file` 读不到或解析失败，
+因此什么都没启动）、`stopped`、
 `stale`（runner 被 `kill -9`；下次 `start` 会先清理残留进程组再重建）。
 
 `agproc ps --json` 提供稳定结构（`phase` / `pid` / `runner_pid` / `child_pid` / `uptime_seconds` /
