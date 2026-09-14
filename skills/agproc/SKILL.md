@@ -1,31 +1,26 @@
 ---
 name: agproc
-description: Dev-time process manager for the services of a project (backend, frontend, workers). Use whenever the project root contains an agproc.toml, and whenever a local service must be started, restarted, stopped or inspected — triggers include "start the backend", "restart the frontend", "why did the dev server fail", "is the server running", "show me the server logs", "the port is already in use". Always load the full guide with `agproc skills` before acting, and prefer agproc over running dev servers by hand.
+description: Dev-time process manager for a project's services. Use whenever the project root contains an agproc.toml or local services need attention. Before acting, run `agproc skills`; prefer agproc over invoking development servers by hand.
 allowed-tools: Bash(agproc:*)
 ---
 
 # agproc
 
-This is a discovery stub. `agproc` serves the real, project-specific guide from the
-installed binary, so the instructions can never drift from the CLI you are running.
+This is a discovery stub, not the operating manual. The installed `agproc` binary
+serves the complete, version-matched guide and the current project's service table.
 
-**Before doing anything with services in this project, load the guide:**
+## Required first step
+
+Before any service action, load the guide:
 
 ```bash
-agproc skills          # full guide, specialised for this project's services
-agproc skills --json   # same content plus structured project data
+agproc skills
 ```
 
-## Why it exists
+Use `agproc skills --json` only when structured project data is needed.
 
-A project declares its services in `agproc.toml` (build command, run command, probe).
-agproc builds and runs them, waits until they are genuinely ready, and keeps every
-process's state and logs under `.agproc/`. Repeated commands are safe:
+## Safety boundary
 
-- `agproc start <service>` is idempotent — it prints `ALREADY RUNNING` and exits 0 instead
-  of rebuilding or launching a second copy, so it is safe to call after every edit.
-- `agproc restart <service>` is the edit → restart → read-logs loop.
-- Exit codes are distinct per failure kind (4 build, 5 run, 6 probe, 7 busy).
-
-Do not start these services with `cargo run`, `pnpm dev` and friends: agproc would then be
-unable to stop them, log them or report their state.
+When an `agproc.toml` is present, do not start the project's development servers
+directly (for example, with `cargo run` or `pnpm dev`). Load the guide first, then
+follow its instructions for all service operations.
