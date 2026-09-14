@@ -5,7 +5,8 @@
 //! earlier sessions. The two streams are replayed independently and keep their
 //! original destinations.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -107,6 +108,48 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
     Ok(exit::OK)
 }
 
+/// The byte offset at which a follower should start to replay a tail window.
+///
+/// A partial final line counts toward the window, matching non-follow replay.
+/// `LogRelay` still buffers that partial line until it is completed or flushed.
+fn tail_start_offset(bytes: &[u8], tail: usize) -> usize {
+    if tail == 0 {
+        return bytes.len();
+    }
+
+    let mut line_count = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        line_count += 1;
+    }
+    if line_count <= tail {
+        return 0;
+    }
+
+    let discarded = line_count - tail;
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(discarded - 1)
+        .map_or(0, |(index, _)| index + 1)
+}
+
+/// Determine a follower's initial offset from one file snapshot.
+///
+/// Missing logs are equivalent to empty logs; other I/O failures stay visible
+/// to the caller rather than silently turning a broken log path into no output.
+fn follow_start_offset(path: &Path, tail: Option<usize>) -> Result<u64> {
+    let Some(tail) = tail else {
+        return Ok(0);
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(err).with_context(|| format!("cannot read {}", path.display())),
+    };
+    Ok(tail_start_offset(&bytes, tail) as u64)
+}
+
 fn follow(
     project: &Project,
     services: &[&crate::config::Service],
@@ -116,6 +159,10 @@ fn follow(
     let mut relays: Vec<(String, LogRelay)> = Vec::new();
     for service in services {
         let prefix = Prefix::service(&service.name, width);
+        let stdout_offset = follow_start_offset(&project.log_stdout(&service.name), request.tail)
+            .map_err(Failure::from)?;
+        let stderr_offset = follow_start_offset(&project.log_stderr(&service.name), request.tail)
+            .map_err(Failure::from)?;
         let mut relay = LogRelay::new(
             project.log_stdout(&service.name),
             project.log_stderr(&service.name),
@@ -125,7 +172,9 @@ fn follow(
             !matches!(request.stream, Stream::Stderr),
             !matches!(request.stream, Stream::Stdout),
         );
-        relay.seek(0, 0).map_err(Failure::from)?;
+        relay
+            .seek(stdout_offset, stderr_offset)
+            .map_err(Failure::from)?;
         relays.push((service.name.clone(), relay));
     }
 
@@ -157,4 +206,36 @@ fn follow(
         relay.flush();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{follow_start_offset, tail_start_offset};
+
+    #[test]
+    fn tail_start_offset_keeps_the_requested_logical_lines() {
+        let cases: &[(&str, &[u8], usize, usize)] = &[
+            ("empty", b"", 3, 0),
+            ("zero", b"one\ntwo\n", 0, 8),
+            ("fewer than requested", b"one\ntwo\n", 3, 0),
+            ("exactly requested", b"one\ntwo\n", 2, 0),
+            ("complete lines", b"one\ntwo\nthree\n", 2, 4),
+            ("blank line", b"one\n\ntwo\n", 1, 5),
+            ("crlf", b"one\r\ntwo\r\nthree\r\n", 2, 5),
+            ("partial final line", b"one\ntwo", 1, 4),
+        ];
+
+        for &(name, bytes, tail, expected) in cases {
+            assert_eq!(tail_start_offset(bytes, tail), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn follow_start_offset_treats_a_missing_log_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            follow_start_offset(&dir.path().join("missing.log"), Some(5)).unwrap(),
+            0
+        );
+    }
 }

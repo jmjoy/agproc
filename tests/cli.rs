@@ -1181,3 +1181,300 @@ run-cmd = ["sh", "-c", "echo value-$FROM_FILE; sleep 120"]
 
     let _ = project.agproc(&["stop"]);
 }
+#[test]
+fn logs_tail_follow_replays_each_stream_per_service_and_stops() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = ["sh", "-c", "for i in 1 2 3; do echo api-out-old-$i; echo api-err-old-$i >&2; done; while [ ! -e .release-tail-follow ]; do sleep 0.02; done; echo api-out-live; echo api-err-live >&2"]
+
+[[service]]
+name = "worker"
+run-cmd = ["sh", "-c", "for i in 1 2 3; do echo worker-out-old-$i; echo worker-err-old-$i >&2; done; while [ ! -e .release-tail-follow ]; do sleep 0.02; done; echo worker-out-live; echo worker-err-live >&2"]
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    wait_for("tail-follow history", || {
+        ["api", "worker"].iter().all(|service| {
+            std::fs::read_to_string(project.file(&format!(".agproc/logs/{service}.stdout.log")))
+                .map(|logs| logs.contains(&format!("{service}-out-old-3")))
+                .unwrap_or(false)
+                && std::fs::read_to_string(
+                    project.file(&format!(".agproc/logs/{service}.stderr.log")),
+                )
+                .map(|logs| logs.contains(&format!("{service}-err-old-3")))
+                .unwrap_or(false)
+        })
+    });
+
+    let mut child = Command::new(bin())
+        .current_dir(project.path())
+        .args(["logs", "--tail", "2", "-f"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn logs --tail 2 -f");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let stdout_reader = collect_follow_stdout(child.stdout.take().expect("logs stdout"), ready_tx);
+    let stderr_reader = collect_follow_stderr(child.stderr.take().expect("logs stderr"));
+
+    wait_for_follow_lines(
+        &ready_rx,
+        &["api    | api-out-old-2", "worker | worker-out-old-2"],
+    );
+    project.write(".release-tail-follow", "");
+
+    let status = child.wait().expect("wait for logs --tail 2 -f");
+    let stdout = stdout_reader.join().expect("stdout reader");
+    let stderr = stderr_reader.join().expect("stderr reader");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    for service in ["api", "worker"] {
+        assert!(
+            !stdout.contains(&format!("{service}-out-old-1")),
+            "older stdout history leaked:\n{stdout}"
+        );
+        assert!(
+            !stderr.contains(&format!("{service}-err-old-1")),
+            "older stderr history leaked:\n{stderr}"
+        );
+        has(&stdout, &format!("{service}-out-old-2"));
+        has(&stdout, &format!("{service}-out-old-3"));
+        has(&stdout, &format!("{service}-out-live"));
+        has(&stderr, &format!("{service}-err-old-2"));
+        has(&stderr, &format!("{service}-err-old-3"));
+        has(&stderr, &format!("{service}-err-live"));
+    }
+    has(&stdout, "api    | api-out-old-2");
+    has(&stdout, "worker | worker-out-old-2");
+    assert!(
+        !stdout.contains("-err-"),
+        "stderr leaked into stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("-out-"),
+        "stdout leaked into stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn logs_tail_zero_follow_skips_history_and_follows_appends() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "zero"
+run-cmd = ["sh", "-c", "for i in 1 2; do echo zero-out-old-$i; echo zero-err-old-$i >&2; done; while [ ! -e .release-tail-zero ]; do sleep 0.02; done; i=1; while [ $i -le 10 ]; do echo zero-out-live-$i; echo zero-err-live-$i >&2; i=$((i+1)); sleep 0.1; done"]
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    wait_for("tail-zero history", || {
+        std::fs::read_to_string(project.file(".agproc/logs/zero.stdout.log"))
+            .map(|logs| logs.contains("zero-out-old-2"))
+            .unwrap_or(false)
+            && std::fs::read_to_string(project.file(".agproc/logs/zero.stderr.log"))
+                .map(|logs| logs.contains("zero-err-old-2"))
+                .unwrap_or(false)
+    });
+
+    let dir = project.path().to_path_buf();
+    let handle = std::thread::spawn(move || {
+        Command::new(bin())
+            .current_dir(&dir)
+            .args(["logs", "zero", "--tail", "0", "-f"])
+            .output()
+            .expect("logs --tail 0 -f")
+    });
+    // The service remains gated, then writes for long enough that the assertion
+    // observes new output even on a busy test host.
+    std::thread::sleep(Duration::from_millis(200));
+    project.write(".release-tail-zero", "");
+
+    let output = handle.join().expect("tail-zero follow thread");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("zero-out-old-"),
+        "historical stdout leaked:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("zero-err-old-"),
+        "historical stderr leaked:\n{stderr}"
+    );
+    has(&stdout, "zero-out-live-10");
+    has(&stderr, "zero-err-live-10");
+    assert!(
+        !stdout.contains("zero-err-"),
+        "stderr leaked into stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("zero-out-"),
+        "stdout leaked into stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn logs_tail_follow_respects_stream_filter() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "filtered"
+run-cmd = ["sh", "-c", "for i in 1 2; do echo filtered-out-old-$i; echo filtered-err-old-$i >&2; done; while [ ! -e .release-filtered ]; do sleep 0.02; done; echo filtered-out-live; echo filtered-err-live >&2"]
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    wait_for("filtered history", || {
+        std::fs::read_to_string(project.file(".agproc/logs/filtered.stdout.log"))
+            .map(|logs| logs.contains("filtered-out-old-2"))
+            .unwrap_or(false)
+    });
+
+    let mut child = Command::new(bin())
+        .current_dir(project.path())
+        .args([
+            "logs", "filtered", "--tail", "1", "-f", "--stream", "stdout",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn filtered logs");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let stdout_reader = collect_follow_stdout(child.stdout.take().expect("logs stdout"), ready_tx);
+    let stderr_reader = collect_follow_stderr(child.stderr.take().expect("logs stderr"));
+
+    wait_for_follow_lines(&ready_rx, &["filtered-out-old-2"]);
+    project.write(".release-filtered", "");
+
+    let status = child.wait().expect("wait for filtered logs");
+    let stdout = stdout_reader.join().expect("stdout reader");
+    let stderr = stderr_reader.join().expect("stderr reader");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("filtered-out-old-1"),
+        "older stdout history leaked:\n{stdout}"
+    );
+    has(&stdout, "filtered-out-old-2");
+    has(&stdout, "filtered-out-live");
+    assert!(
+        !stdout.contains("filtered-err-"),
+        "stderr leaked into stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "stderr stream should be disabled:\n{stderr}"
+    );
+}
+
+#[test]
+fn logs_follow_without_tail_replays_all_history() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "full"
+run-cmd = ["sh", "-c", "for i in 1 2 3; do echo full-out-old-$i; done; while [ ! -e .release-full-follow ]; do sleep 0.02; done; echo full-out-live"]
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    wait_for("full-follow history", || {
+        std::fs::read_to_string(project.file(".agproc/logs/full.stdout.log"))
+            .map(|logs| logs.contains("full-out-old-3"))
+            .unwrap_or(false)
+    });
+
+    let mut child = Command::new(bin())
+        .current_dir(project.path())
+        .args(["logs", "full", "-f", "--stream", "stdout"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn logs -f");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let stdout_reader = collect_follow_stdout(child.stdout.take().expect("logs stdout"), ready_tx);
+    let stderr_reader = collect_follow_stderr(child.stderr.take().expect("logs stderr"));
+
+    wait_for_follow_lines(
+        &ready_rx,
+        &["full-out-old-1", "full-out-old-2", "full-out-old-3"],
+    );
+    project.write(".release-full-follow", "");
+
+    let status = child.wait().expect("wait for logs -f");
+    let stdout = stdout_reader.join().expect("stdout reader");
+    let stderr = stderr_reader.join().expect("stderr reader");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    has(&stdout, "full-out-old-1");
+    has(&stdout, "full-out-old-2");
+    has(&stdout, "full-out-old-3");
+    has(&stdout, "full-out-live");
+    assert!(
+        stderr.is_empty(),
+        "stderr stream should be disabled:\n{stderr}"
+    );
+}
+
+fn collect_follow_stdout(
+    stdout: std::process::ChildStdout,
+    sender: std::sync::mpsc::Sender<String>,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+            let line = line.expect("read logs -f stdout");
+            output.push_str(&line);
+            output.push('\n');
+            let _ = sender.send(line);
+        }
+        output
+    })
+}
+
+fn collect_follow_stderr(mut stderr: std::process::ChildStderr) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut stderr, &mut output).expect("read logs -f stderr");
+        output
+    })
+}
+
+fn wait_for_follow_lines(receiver: &std::sync::mpsc::Receiver<String>, expected: &[&str]) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = String::new();
+    while Instant::now() < deadline {
+        if expected.iter().all(|needle| output.contains(needle)) {
+            return;
+        }
+        match receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) => {
+                output.push_str(&line);
+                output.push('\n');
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(
+        expected.iter().all(|needle| output.contains(needle)),
+        "timed out waiting for {expected:?}; got:\n{output}"
+    );
+}

@@ -77,7 +77,7 @@ agproc init    [--force]                            # 生成模板
 - 省略 `[service...]` 表示**全部** service；支持一次写多个名字。
 - `-C/--config <PATH>` 或环境变量 `AGPROC_CONFIG` 指定配置；否则像 git/cargo 一样从当前目录**向上查找** `agproc.toml`，`.agproc/` 建在配置文件同目录。
 - `--timeout-seconds` 只约束**命令等待**：超时打印 `STILL STARTING` 并返回 1，**不会杀掉后台 runner**，可继续用 `ps` / `logs` 观察。
-- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每条流**各取末 N 行；`-f` 会在服务停止后**自动返回**，不会挂住 AI 智能体。
+- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每条流**各取末 N 行；与 `-f` 组合时，先回放这些尾部行，再持续跟随新增输出（`--tail 0 -f` 不回放历史）。不带 `--tail` 时，`-f` 仍完整回放历史。它会在服务停止后**自动返回**，不会挂住 AI 智能体。
 
 ## 配置文件 `agproc.toml`
 

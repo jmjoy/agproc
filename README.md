@@ -82,8 +82,10 @@ agproc init    [--force]                            # write a config template
 - `--timeout-seconds` bounds **the command's wait only**: on timeout it prints `STILL STARTING` and
   exits 1, but the **background runner keeps working** — keep tracking it with `ps` / `logs`.
 - `agproc logs` replays the **last run-cmd's** stdout/stderr and nothing else: no agproc markers, no
-  build output, no earlier runs. `--tail N` keeps the last N lines of **each** stream, and `-f`
-  **returns by itself** once the service stops, so it never hangs an agent.
+  build output, no earlier runs. `--tail N` keeps the last N lines of **each** stream; with `-f`, it
+  replays that tail before following new output (`--tail 0 -f` skips history). Without `--tail`, `-f`
+  still replays the complete history. It **returns by itself** once the service stops, so it never
+  hangs an agent.
 
 ## Configuration: `agproc.toml`
 

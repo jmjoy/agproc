@@ -61,7 +61,9 @@ Flags worth knowing:
   prints `STILL STARTING` and exits 1, but the service keeps building/running in the
   background — check `agproc ps` instead of starting a second one.
 - `agproc logs` replays the **last run-cmd's** output only, with `--tail N` keeping the last N lines
-  of each stream. `-f` returns as soon as the service stops, so it never hangs.
+  of each stream. With `-f`, it replays that tail before following new output; `--tail 0 -f` skips
+  history, while omitting `--tail` still replays the complete history. `-f` returns as soon as the
+  service stops, so it never hangs.
 - Build output is shown live by `start`/`restart` but is not kept in the service logs. After a failed
   build, read it back from `.agproc/tmp/<service>.console.stdout` (the transient console stream).
 - stdout goes to agproc's stdout and stderr to agproc's stderr; with several services every line
