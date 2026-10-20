@@ -14,8 +14,9 @@ process's state and logs under `.agproc/`, so calling it repeatedly is safe.
    intended loop — edit, restart, read logs. `start` never re-runs an already-running service.
 4. **Trust the exit code, not the prose.** Every failure has a distinct exit code (below).
 5. **`agproc logs` is the service's output and nothing else.** It replays the last run-cmd's
-   stdout/stderr (`.agproc/logs/<service>.stdout.log` and `.stderr.log`) — no agproc markers, no
-   build output, no earlier runs. What you saw on the console of `start` is not repeated there.
+   combined stdout/stderr (`.agproc/logs/<service>.log`) — no agproc markers, no build output,
+   no earlier runs. Read this single file directly when inspecting a service’s output;
+   `ps --json` and `skills --json` expose its path as `log_path`.
 
 ## The intended agent loop
 
@@ -51,7 +52,7 @@ line with the service name, padded to the longest one so the `|` columns line up
 | `agproc restart [service...]` | stop, then build + run + wait for the probe |
 | `agproc stop [service...]` | stop a running service or cancel a build that is in progress |
 | `agproc ps [service...] [--json]` | what is running, with phase, pid, uptime and reason |
-| `agproc logs [service...] [--tail N] [-f] [--stream both\|stdout\|stderr]` | replay or follow the last run-cmd's output |
+| `agproc logs [service...] [--tail N] [-f]` | replay or follow the last run-cmd's output |
 | `agproc skills` | this document, specialised for this project |
 | `agproc init [--force]` | write an `agproc.toml` template |
 
@@ -61,14 +62,17 @@ Flags worth knowing:
   prints `STILL STARTING` and exits 1, but the service keeps building/running in the
   background — check `agproc ps` instead of starting a second one.
 - `agproc logs` replays the **last run-cmd's** output only, with `--tail N` keeping the last N lines
-  of each stream. With `-f`, it replays that tail before following new output; `--tail 0 -f` skips
+  of each service’s combined log. With `-f`, it replays that tail before following new output; `--tail 0 -f` skips
   history, while omitting `--tail` still replays the complete history. `-f` returns as soon as the
   service stops, so it never hangs.
 - Build output is shown live by `start`/`restart` but is not kept in the service logs. After a failed
-  build, read it back from `.agproc/tmp/<service>.console.stdout` (the transient console stream).
-- stdout goes to agproc's stdout and stderr to agproc's stderr; with several services every line
-  gets a `name |` prefix (name padded to the longest one). Both streams share that prefix, so read
-  the stream — not the text — to tell them apart.
+  build, read it back from `.agproc/tmp/<service>.console.log` (the transient console stream).
+- Each build/run child uses one shared PTY for stdout and stderr. `start`, `restart`, and `logs`
+  send combined child output to stdout; agproc command diagnostics use stderr. With several
+  services each line gets a `name |` prefix, padded to the longest service name.
+- Log layout 2 uses one file per service and removes `--stream`. After upgrading, restart existing
+  services to create combined logs; older split files stay on disk for direct inspection.
+  Old process state remains usable by `ps`, `stop`, and `restart`.
 
 ## Exit codes
 
@@ -126,12 +130,14 @@ could not be read or parsed, so nothing was started), `stopped`,
   `agproc stop <service>` first; do not fire a second `start` in a loop.
 - **`config failed`** — the service declares an `env-file` (a `.env`-style file) that could not be
   read or parsed; nothing was started. The `CONFIG FAILED` line on the console names the file, and
-  the detail is kept in `.agproc/tmp/<service>.console.stdout`. Fix the file (or the `env-file`
+  the detail is kept in `.agproc/tmp/<service>.console.log`. Fix the file (or the `env-file`
   path, which is relative to the project root) and run `agproc restart <service>`.
 - **`stale`** — the supervisor process was killed. Run `agproc start <service>`: it kills
   the leftover process group and builds again.
-- **Build output missing?** Most build tools write progress to stderr, which agproc keeps
-  on its own stderr; run `agproc logs <service> --stream stderr` if you filtered it out.
+- **Build output missing?** Build stdout and stderr are combined in the startup console output.
+  After a failed build, read `.agproc/tmp/<service>.console.log`; `agproc logs` holds run output only.
+- **Legacy split logs?** Run `agproc restart <service>` to create `.agproc/logs/<service>.log`.
+  `start` is idempotent and does not convert a running service’s old logs. The old files are kept.
 
 ## Anti-patterns
 

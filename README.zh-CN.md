@@ -26,7 +26,7 @@ agproc stop               # 全部停掉
 | 对于不带 watch 的 dev server 来说，需要有一种手段能便捷地跑“重新编译 + 运行”流程，而且对人类和 AI 智能体来说都保证只有一个服务进程在运行 | `build-cmd` + `run-cmd` 分离并统一编排，构建失败有专属 marker 与**退出码 4**，AI 智能体无需解析文本；内置编排锁与生命周期管理，确保任何时候严格只有一个服务实例在运行，改完代码通过 `restart` 即可安全重跑 |
 | 只按「进程还在」判断就绪，误报很多 | 内置 `http-get` / `tcp-connect` 探针，重试到 `failure-threshold` 才判定失败（**退出码 6**） |
 | 端口被残留进程占着，探针"对着别人的进程"通过 | 端口预检告警 + 就绪瞬间的**归属校验** + 子进程退出事件优先，三重机制，绝不谎报成功 |
-| 日志被管道块缓冲，就绪前的关键输出看不到 | 每个 stream 一个 PTY，子进程保持**行缓冲**，输出实时可见 |
+| 日志被管道块缓冲，就绪前的关键输出看不到 | stdout/stderr 共用一个 PTY，支持终端模式的程序保持**行缓冲**，两路输出写入同一份日志 |
 
 ## 安装
 
@@ -69,7 +69,7 @@ agproc start   [service...] [--timeout-seconds N]   # 未运行则 build + run +
 agproc restart [service...] [--timeout-seconds N]   # 先停，再 build + run + 等就绪
 agproc stop    [service...]                         # 停止运行中的服务，或取消进行中的 build
 agproc ps      [service...] [--json]                # 状态查询
-agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr]
+agproc logs    [service...] [--tail N] [-f]
 agproc skills  [--json]                             # 输出项目专属的 AI 智能体指引
 agproc init    [--force]                            # 生成模板
 ```
@@ -77,7 +77,7 @@ agproc init    [--force]                            # 生成模板
 - 省略 `[service...]` 表示**全部** service；支持一次写多个名字。
 - `-C/--config <PATH>` 或环境变量 `AGPROC_CONFIG` 指定配置；否则像 git/cargo 一样从当前目录**向上查找** `agproc.toml`，`.agproc/` 建在配置文件同目录。
 - `--timeout-seconds` 只约束**命令等待**：超时打印 `STILL STARTING` 并返回 1，**不会杀掉后台 runner**，可继续用 `ps` / `logs` 观察。
-- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每条流**各取末 N 行；与 `-f` 组合时，先回放这些尾部行，再持续跟随新增输出（`--tail 0 -f` 不回放历史）。不带 `--tail` 时，`-f` 仍完整回放历史。它会在服务停止后**自动返回**，不会挂住 AI 智能体。
+- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每个服务的合并日志**各取末 N 行；与 `-f` 组合时，先回放这些尾部行，再持续跟随新增输出（`--tail 0 -f` 不回放历史）。不带 `--tail` 时，`-f` 仍完整回放历史。它会在服务停止后**自动返回**，不会挂住 AI 智能体。
 
 ## 配置文件 `agproc.toml`
 
@@ -128,7 +128,7 @@ probe = { tcp-connect = { host = "127.0.0.1", port = 5173 },
   `GREETING="hello world"`）。路径**相对项目根**（与 `cwd` 一致，不做 `~` 展开），
   文件在服务启动时读一次，改动后需要 `agproc restart`。优先级为 `env` > `env-file` > 继承的环境变量；
   同一文件里重复声明同一个 key 会被拒绝。文件缺失或解析失败时启动失败，阶段 `config failed`、**退出码 3**，
-  `agproc ps` 会显示该阶段，原因留在 `.agproc/tmp/<service>.console.stdout`。文件内容计入配置指纹，
+  `agproc ps` 会显示该阶段，原因留在 `.agproc/tmp/<service>.console.log`。文件内容计入配置指纹，
   改动后 `ps` 会显示 `[config changed since start]`、`start` 会提示需要重启。
 - 多个 service 会**并行**启动。
 
@@ -156,8 +156,10 @@ agproc 自己的日志统一是 `===== XXX =====`：
 **这些行出现的位置**：`start` / `restart`（以及 `stop`）的控制台，**不写入服务日志文件**——
 所以 `agproc logs` 的输出里不会出现它们。
 
-**流分离**：子进程的 stdout 原样进入 agproc 的 stdout，stderr 原样进入 agproc 的 stderr。
-单 service 时不加前缀（可直接管道）；多个 service 时每行都带服务名前缀，名字按**最长**的那个补齐
+**合并输出**：`build-cmd` 和 `run-cmd` 的每个子进程都只使用一个 PTY，stdout/stderr
+连接同一个 PTY。`start`、`restart`、`logs` 展示的子进程输出统一进入 agproc 的 stdout；
+agproc 自身的命令诊断进入 stderr。单 service 时不加前缀（可直接管道）；
+多个 service 时每行都带服务名前缀，名字按**最长**的那个补齐
 空格，让 `|` 列对齐：
 
 ```text
@@ -165,8 +167,14 @@ backend  | ===== RUNNING =====          # `backend` 补齐到 `frontend` 的宽�
 frontend | ===== PROBE PASSED =====
 ```
 
-> 为什么能同时做到实时与分流：给 stdout 和 stderr 各分配一个 PTY，子进程认为自己在终端里，
-> 因此保持**行缓冲**；若直接重定向到文件/管道，Python 等会切成全缓冲——实测 1.2 秒内文件里是 0 字节。
+> 共用一个 PTY 后，两路输出都具有终端属性，Python 等运行时会采用行缓冲，
+> 减少直接重定向到文件或管道时的块缓冲延迟。日志保留字节实际写入该 PTY 的顺序；
+> 应用自身的缓冲仍可能延迟写入，多个进程的输出也可能交错。
+
+```bash
+agproc logs backend | rg ERROR
+agproc logs backend > service.log
+```
 
 ## 退出码
 
@@ -191,16 +199,14 @@ frontend | ===== PROBE PASSED =====
 
 `agproc ps --json` 提供稳定结构（`phase` / `pid` / `runner_pid` / `child_pid` / `uptime_seconds` /
 `build_exit_code` / `run_exit_code` / `probe{kind,target,attempts,last_error}` / `config_changed` /
-`log_stdout` / `log_stderr`）。
+`log_path`）。
 
 ## `.agproc/` 目录
 
 ```text
 .agproc/
-├── logs/<service>.stdout.log      # 只有 run-cmd 的 stdout（session 开始时截断）
-├── logs/<service>.stderr.log      # 只有 run-cmd 的 stderr
-├── tmp/<service>.console.stdout    # 临时控制台流：marker + build 输出 + 就绪前的 run 输出
-├── tmp/<service>.console.stderr    # 同上 stderr 侧，另含 runner 自身的报错
+├── logs/<service>.log             # run-cmd 的合并输出（session 开始时截断）
+├── tmp/<service>.console.log      # marker + 合并的构建/启动输出 + runner 自身报错
 ├── state/<service>.json           # 运行时状态（原子写入，ps 的唯一事实源）
 ├── lock/<service>.lock            # 编排锁（flock）
 └── tmp/                           # 原子写临时文件
@@ -208,9 +214,18 @@ frontend | ===== PROBE PASSED =====
 
 **run 日志**里只有服务自己打印的内容，这正是 `agproc logs` 精确的原因。agproc 自己的
 `===== ... =====` 行与 build-cmd 的输出改走**控制台流**：它是 `start`/`restart` 实时转发的内容，
-stdout/stderr 分别映射到 agproc 自己的两条流，并且是临时的——下一次 session 会截断它，
+统一转发到 agproc 的 stdout，并且是临时的——下一次 session 会截断它，
 而一个**走到就绪**的 session 结束时会被删除。失败路径会保留它，所以构建失败仍可排查：
-`cat .agproc/tmp/<service>.console.stdout`。
+`cat .agproc/tmp/<service>.console.log`。
+
+AI 智能体可以直接读取 `.agproc/logs/<service>.log` 获取完整运行输出；
+`ps --json` 和 `skills --json` 通过 `log_path` 提供该路径。
+
+日志布局版本 2 将旧的 `.stdout.log` / `.stderr.log`、`.console.stdout` / `.console.stderr`
+分别合并为单文件，删除 `--stream`，JSON 字段 `log_stdout` / `log_stderr` 改为 `log_path`。
+升级后用 `agproc restart <service>` 为已有服务创建合并日志；`start` 仍保持幂等。
+旧日志保留供直接查阅；对于仍使用分流日志的服务，`logs` 会报错并提示重启。
+旧进程状态仍可读取，`ps`、`stop` 和 `restart` 可以继续管理旧 runner。
 
 `agproc init` 会把 `.agproc/` 追加进 `.gitignore`。
 

@@ -52,8 +52,7 @@ struct Row {
     probe: Option<ProbeInfo>,
     config_changed: bool,
     detail: String,
-    log_stdout: String,
-    log_stderr: String,
+    log_path: String,
 }
 
 #[derive(Serialize)]
@@ -66,7 +65,7 @@ struct Report {
 pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, Failure> {
     let services = select_services(config, &request.services).map_err(Failure::config)?;
     if let Some(warning) = project.layout_warning() {
-        Prefix::plain().marker(&format!("WARNING: {warning}"));
+        Prefix::plain().diagnostic(&format!("WARNING: {warning}"));
     }
 
     let mut rows = Vec::new();
@@ -110,8 +109,7 @@ fn row_for(
     project: &Project,
 ) -> Row {
     let target = service.target();
-    let log_stdout = project.log_stdout(&service.name).display().to_string();
-    let log_stderr = project.log_stderr(&service.name).display().to_string();
+    let log_path = project.log_path(&service.name).display().to_string();
 
     let Some(state) = state else {
         return Row {
@@ -129,8 +127,7 @@ fn row_for(
             probe: None,
             config_changed: false,
             detail: "never started".to_string(),
-            log_stdout,
-            log_stderr,
+            log_path,
         };
     };
 
@@ -138,10 +135,7 @@ fn row_for(
     let live = state.runner_live();
     let running = matches!(phase, Phase::Running | Phase::Starting | Phase::Building);
     let detail = match phase {
-        Phase::Building => format!(
-            "building for {}",
-            format_duration_ms(state.uptime_ms())
-        ),
+        Phase::Building => format!("building for {}", format_duration_ms(state.uptime_ms())),
         Phase::Starting => format!("probing ({})", target.describe()),
         Phase::Running => {
             let ready_ago = state
@@ -164,10 +158,14 @@ fn row_for(
         },
         Phase::ProbeFailed => match &state.probe.last_error {
             Some(err) => format!("{} {}: {err}", state.probe.kind, target.describe()),
-            None => format!("{} {} never became ready", state.probe.kind, target.describe()),
+            None => format!(
+                "{} {} never became ready",
+                state.probe.kind,
+                target.describe()
+            ),
         },
         Phase::ConfigFailed => format!(
-            "configuration error (see .agproc/tmp/{}.console.stdout)",
+            "configuration error (see .agproc/tmp/{}.console.log)",
             state.service
         ),
         Phase::Stopped => "stopped".to_string(),
@@ -205,8 +203,7 @@ fn row_for(
         }),
         config_changed,
         detail,
-        log_stdout,
-        log_stderr,
+        log_path,
     }
 }
 

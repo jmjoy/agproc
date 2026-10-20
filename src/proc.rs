@@ -4,8 +4,8 @@
 //! runtimes (Python, some Node tooling) switch to *block* buffering, so the log
 //! lines produced before the service is up may not be written at all until the buffer
 //! fills or the process exits. With a tty on stdout they stay line buffered and
-//! arrive immediately. Each stream gets its own pty so stdout and stderr remain
-//! distinguishable.
+//! arrive immediately. Both stdout and stderr share one pty, preserving their
+//! combined write order in the captured log.
 
 use anyhow::{Context, Result, bail};
 use nix::fcntl::{OFlag, fcntl};
@@ -68,11 +68,10 @@ pub struct SpawnSpec<'a> {
     pub argv: &'a [String],
     pub cwd: &'a Path,
     pub env: &'a BTreeMap<String, String>,
-    pub stdout: RawFd,
-    pub stderr: RawFd,
+    pub output: RawFd,
 }
 
-/// Spawn a child with the given pty slaves on stdout/stderr and `/dev/null` on
+/// Spawn a child with the same pty slave on stdout/stderr and `/dev/null` on
 /// stdin.
 ///
 /// The child gets its own process group (`setpgid(0, 0)`) inside the runner's
@@ -102,8 +101,8 @@ pub fn spawn(spec: &SpawnSpec<'_>) -> Result<Child> {
         cmd.env(key, value);
     }
     cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::from(dup_owned(spec.stdout)?));
-    cmd.stderr(Stdio::from(dup_owned(spec.stderr)?));
+    cmd.stdout(Stdio::from(dup_owned(spec.output)?));
+    cmd.stderr(Stdio::from(dup_owned(spec.output)?));
     cmd.process_group(0);
 
     cmd.spawn()
@@ -122,12 +121,8 @@ fn dup_owned(fd: RawFd) -> Result<OwnedFd> {
 ///
 /// `setsid` puts it in a new session and process group, so it survives the CLI
 /// being killed and stays clear of a harness that kills the tool call's process
-/// group. `stderr` is pointed at the service error log so a panic is visible.
-pub fn spawn_detached(
-    program: &Path,
-    args: &[String],
-    stderr_log: Option<&Path>,
-) -> Result<u32> {
+/// group. `stderr` joins the console log so early failures and panics are visible.
+pub fn spawn_detached(program: &Path, args: &[String], stderr_log: Option<&Path>) -> Result<u32> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     cmd.stdin(Stdio::null());
@@ -284,69 +279,48 @@ mod tests {
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
-    fn drain(master: &OwnedFd, window: Duration) -> Vec<u8> {
-        let mut out = Vec::new();
-        let deadline = Instant::now() + window;
-        while Instant::now() < deadline {
-            match read_available(master) {
-                ReadOutcome::Data(bytes) => {
-                    out.extend_from_slice(&bytes);
-                    if out.contains(&b'\n') {
-                        break;
-                    }
-                }
-                ReadOutcome::Eof => break,
-                ReadOutcome::WouldBlock => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        out
-    }
-
     #[test]
-    #[allow(clippy::zombie_processes)] // waited on indirectly via the group kill
-    fn streams_stay_separate_and_line_buffered() {
-        let out_pty = open_pty().unwrap();
-        let err_pty = open_pty().unwrap();
+    fn shared_pty_is_line_buffered_and_preserves_write_order() {
+        let pty = open_pty().unwrap();
         let argv = vec![
             "python3".to_string(),
             "-c".to_string(),
-            "import sys,time\nprint('OUT-1')\nsys.stderr.write('ERR-1\\n')\nsys.stderr.flush()\ntime.sleep(5)\n".to_string(),
+            r#"import os,sys,time
+assert os.isatty(1) and os.isatty(2)
+assert os.ttyname(1) == os.ttyname(2)
+print('OUT-1')
+sys.stderr.write('ERR-1\n')
+sys.stderr.flush()
+print('OUT-2')
+time.sleep(5)
+"#
+            .to_string(),
         ];
         let env = BTreeMap::new();
-        let child = spawn(&SpawnSpec {
+        let mut child = spawn(&SpawnSpec {
             argv: &argv,
             cwd: Path::new("/tmp"),
             env: &env,
-            stdout: out_pty.slave.as_raw_fd(),
-            stderr: err_pty.slave.as_raw_fd(),
+            output: pty.slave.as_raw_fd(),
         })
         .unwrap();
 
         let mut out = Vec::new();
-        let mut err = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && (out.is_empty() || err.is_empty()) {
-            let readable =
-                poll_readable(&[out_pty.master.as_raw_fd(), err_pty.master.as_raw_fd()], 100)
-                    .unwrap();
+        while Instant::now() < deadline && !out.ends_with(b"OUT-2\n") {
+            let readable = poll_readable(&[pty.master.as_raw_fd()], 100).unwrap();
             if readable[0]
-                && let ReadOutcome::Data(bytes) = read_available(&out_pty.master)
+                && let ReadOutcome::Data(bytes) = read_available(&pty.master)
             {
                 out.extend_from_slice(&bytes);
-            }
-            if readable[1]
-                && let ReadOutcome::Data(bytes) = read_available(&err_pty.master)
-            {
-                err.extend_from_slice(&bytes);
             }
         }
 
         signal_group(child.id() as i32, Signal::SIGKILL).unwrap();
-        let _ = drain(&out_pty.master, Duration::from_millis(200));
+        child.wait().unwrap();
 
-        // Line buffered (no 4 KiB block buffering) and LF only (no ONLCR).
-        assert_eq!(out, b"OUT-1\n", "stdout bytes: {out:?}");
-        assert_eq!(err, b"ERR-1\n", "stderr bytes: {err:?}");
+        // Both fds are the same tty, output arrives before exit, and LF is kept.
+        assert_eq!(out, b"OUT-1\nERR-1\nOUT-2\n", "combined bytes: {out:?}");
     }
 
     #[test]

@@ -176,8 +176,11 @@ mod tests {
             "[package]\nname = \"demo-app\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        std::fs::write(root.join("package.json"), r#"{"scripts":{"build":"x","preview":"y"}}"#)
-            .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"build":"x","preview":"y"}}"#,
+        )
+        .unwrap();
 
         let args = InitArgs {
             root: root.clone(),

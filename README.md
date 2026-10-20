@@ -26,7 +26,7 @@ agproc stop               # stop everything
 | For dev servers without watch mode, there needs to be a convenient way to run the "recompile + run" workflow while guaranteeing only one service process runs for both humans and AI agents | Separates and orchestrates `build-cmd` + `run-cmd`; build failures get their own marker and **exit code 4**, eliminating text parsing. Built-in orchestration locks and lifecycle management ensure strictly one instance runs at any time, with safe `restart` after edits |
 | "The process is still alive" is a weak signal | Built-in `http-get` / `tcp-connect` probes; failure is only declared after `failure-threshold` retries (**exit code 6**) |
 | A leftover process holds the port, so the probe "passes" against someone else's process | Port preflight warning + **ownership verification** at the moment the probe passes + child-exit-first ordering. It never reports a false success |
-| Piped output gets block buffered and early log lines never arrive | One pty per stream keeps the child **line buffered**, so output shows up as it happens |
+| Piped output gets block buffered and early log lines never arrive | One shared PTY for stdout/stderr keeps terminal-aware output **line buffered** and captures both in one log |
 
 ## Install
 
@@ -70,7 +70,7 @@ agproc start   [service...] [--timeout-seconds N]   # build + run + wait for the
 agproc restart [service...] [--timeout-seconds N]   # stop first, then build + run + wait for the probe
 agproc stop    [service...]                         # stop a running service or cancel a build in progress
 agproc ps      [service...] [--json]                # what is running
-agproc logs    [service...] [--tail N] [-f] [--stream both|stdout|stderr]
+agproc logs    [service...] [--tail N] [-f]
 agproc skills  [--json]                             # the project-aware guide for agents
 agproc init    [--force]                            # write a config template
 ```
@@ -82,7 +82,7 @@ agproc init    [--force]                            # write a config template
 - `--timeout-seconds` bounds **the command's wait only**: on timeout it prints `STILL STARTING` and
   exits 1, but the **background runner keeps working** — keep tracking it with `ps` / `logs`.
 - `agproc logs` replays the **last run-cmd's** stdout/stderr and nothing else: no agproc markers, no
-  build output, no earlier runs. `--tail N` keeps the last N lines of **each** stream; with `-f`, it
+  build output, no earlier runs. `--tail N` keeps the last N lines of **each service’s combined log**; with `-f`, it
   replays that tail before following new output (`--tail 0 -f` skips history). Without `--tail`, `-f`
   still replays the complete history. It **returns by itself** once the service stops, so it never
   hangs an agent.
@@ -140,7 +140,7 @@ Rules:
   once when the service starts, so editing it needs `agproc restart`. Precedence is
   `env` > `env-file` > the inherited environment. A key declared twice in one file is rejected.
   A file that is missing or unparsable fails the start with phase `config failed` and **exit 3** —
-  `agproc ps` shows the phase and the reason stays in `.agproc/tmp/<service>.console.stdout`.
+  `agproc ps` shows the phase and the reason stays in `.agproc/tmp/<service>.console.log`.
   The contents are part of the config fingerprint, so after editing the file `ps` reports
   `[config changed since start]` and `start` tells you to restart.
 - Multiple services are started **in parallel**.
@@ -169,8 +169,9 @@ Everything agproc says itself looks like `===== LIKE THIS =====`:
 **Where these lines live**: on the console of `start` / `restart` (and of `stop`), never in the
 service's log files — `agproc logs` is free of them.
 
-**Streams stay separate**: a child's stdout goes to agproc's stdout and its stderr to agproc's
-stderr, unchanged. A single service gets no prefix (so it can be piped); with several services every
+**Combined output**: both `build-cmd` and `run-cmd` connect stdout and stderr to one shared PTY
+per child. `start`, `restart`, and `logs` forward the combined output to agproc’s stdout; agproc’s
+own command diagnostics use stderr. A single service gets no prefix (so it can be piped); with several services every
 line is prefixed with the service name, padded to the **longest** name so the `|` columns line up:
 
 ```text
@@ -178,10 +179,15 @@ backend  | ===== RUNNING =====          # `backend` padded to the width of `fron
 frontend | ===== PROBE PASSED =====
 ```
 
-> How it manages to be both live *and* split: stdout and stderr each get their own pty, so the child
-> believes it is on a terminal and stays **line buffered**. Redirect straight to a file or pipe and
-> runtimes such as Python switch to block buffering — measured: the file was still 0 bytes after
-> 1.2 seconds.
+> A shared PTY makes both output descriptors look like a terminal, so runtimes such as Python
+> use line buffering instead of the block buffering commonly used with pipes or files. The log
+> preserves the order bytes reach that PTY; buffering inside the application can still delay writes.
+> Output from multiple processes can interleave.
+
+```bash
+agproc logs backend | rg ERROR
+agproc logs backend > service.log
+```
 
 ## Exit codes
 
@@ -206,16 +212,14 @@ next `start` reaps the leftover process group and rebuilds).
 
 `agproc ps --json` emits a stable shape (`phase` / `pid` / `runner_pid` / `child_pid` /
 `uptime_seconds` / `build_exit_code` / `run_exit_code` / `probe{kind,target,attempts,last_error}` /
-`config_changed` / `log_stdout` / `log_stderr`).
+`config_changed` / `log_path`).
 
 ## The `.agproc/` directory
 
 ```text
 .agproc/
-├── logs/<service>.stdout.log      # run-cmd stdout only (truncated when a session starts)
-├── logs/<service>.stderr.log      # run-cmd stderr only
-├── tmp/<service>.console.stdout   # transient console stream: markers + build output + startup output
-├── tmp/<service>.console.stderr   # same for stderr, plus the runner's own errors
+├── logs/<service>.log             # combined run-cmd output (truncated when a session starts)
+├── tmp/<service>.console.log      # markers + combined build/startup output + runner errors
 ├── state/<service>.json           # runtime state (atomic writes; the source of truth for ps)
 ├── lock/<service>.lock            # orchestration lock (flock)
 └── tmp/                           # temp files for atomic writes
@@ -223,10 +227,20 @@ next `start` reaps the leftover process group and rebuilds).
 
 The **run logs** hold what the service printed and nothing else, which is why `agproc logs` is
 precise. Agproc's own `===== ... =====` lines and the build-cmd output go to the **console stream**
-instead: it is what `start`/`restart` forward live, its stdout/stderr split mirrored onto agproc's
-own, and it is transient — truncated by the next session, and removed once a session that reached
+instead: it is what `start`/`restart` forward live to stdout, and it is transient — truncated by the
+next session, and removed once a session that reached
 readiness ends. Failure paths keep it, so a failed build stays diagnosable:
-`cat .agproc/tmp/<service>.console.stdout`.
+`cat .agproc/tmp/<service>.console.log`.
+
+AI agents can read `.agproc/logs/<service>.log` directly for the complete run output;
+`ps --json` and `skills --json` expose that path as `log_path`.
+
+Log layout 2 replaces the old `.stdout.log` / `.stderr.log` and `.console.stdout` /
+`.console.stderr` pairs. `--stream` is removed, and the JSON fields `log_stdout` / `log_stderr`
+are replaced by `log_path`. After upgrading, use `agproc restart <service>` to create combined
+logs for an existing service; `start` remains idempotent. Old log files are kept for direct
+inspection, and `logs` reports an error for a service still using split logs. Existing process
+state remains readable so `ps`, `stop`, and `restart` can manage older runners.
 
 `agproc init` appends `.agproc/` to `.gitignore`.
 

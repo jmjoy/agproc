@@ -14,8 +14,8 @@ use crate::logstore;
 ///
 /// A single-service invocation is a pure pass-through (no prefix), while a
 /// multi-service invocation labels every line so the merged view stays
-/// readable. stdout and stderr share the label: the streams themselves stay
-/// separate, so the reader does not need a textual marker for stderr.
+/// readable. Child stdout and stderr are captured together and relayed to our
+/// stdout; agproc diagnostics use stderr.
 #[derive(Clone, Debug)]
 pub struct Prefix {
     /// `"backend  | "` in a multi-service invocation (the name padded to the

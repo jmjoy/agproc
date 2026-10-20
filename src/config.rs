@@ -425,7 +425,9 @@ fn validate_service(service: &Service) -> Result<()> {
         .chars()
         .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.'))
     {
-        bail!("service \"{name}\": name must not contain {bad:?} (allowed: letters, digits, '-', '_', '.')");
+        bail!(
+            "service \"{name}\": name must not contain {bad:?} (allowed: letters, digits, '-', '_', '.')"
+        );
     }
     validate_cmd(name, "run-cmd", &service.run_cmd)?;
     if let Some(build_cmd) = &service.build_cmd {
@@ -531,10 +533,7 @@ probe = {
             service.build_cmd.as_ref().unwrap().display(),
             r#"["cargo", "build"]"#
         );
-        assert_eq!(
-            service.target().describe(),
-            "http://127.0.0.1:3100/healthz"
-        );
+        assert_eq!(service.target().describe(), "http://127.0.0.1:3100/healthz");
         assert_eq!(service.target().local_port(), Some(3100));
         let probe = service.probe.as_ref().unwrap();
         assert_eq!(probe.failure_threshold, 3);
@@ -557,10 +556,7 @@ probe = { tcp-connect = { port = 5432 } }
         assert_eq!(probe.period_seconds, 1);
         assert_eq!(probe.timeout_seconds, 2);
         assert_eq!(probe.failure_threshold, 3);
-        assert_eq!(
-            config.services[0].target().describe(),
-            "tcp 127.0.0.1:5432"
-        );
+        assert_eq!(config.services[0].target().describe(), "tcp 127.0.0.1:5432");
     }
 
     #[test]

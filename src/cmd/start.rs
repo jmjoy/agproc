@@ -57,7 +57,7 @@ enum Started {
 
 pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, Failure> {
     if let Some(warning) = project.layout_warning() {
-        Prefix::plain().marker(&format!("WARNING: {warning}"));
+        Prefix::plain().diagnostic(&format!("WARNING: {warning}"));
     }
     project.ensure_layout().map_err(Failure::from)?;
 
@@ -97,13 +97,7 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
                 let prefix = Prefix::service(&service.name, width);
                 let name = service.name.clone();
                 let outcome = start_one(
-                    &project,
-                    &settings,
-                    &service,
-                    &hash,
-                    restart,
-                    timeout,
-                    &prefix,
+                    &project, &settings, &service, &hash, restart, timeout, &prefix,
                 );
                 (name, outcome)
             }));
@@ -181,11 +175,12 @@ fn start_one(
         && let Some(pgid) = state.child_pgid
         && proc::group_exists(pgid)
     {
-        prefix.marker(&format!(
-            "CLEANING UP LEFTOVER PROCESS GROUP (pgid {pgid})"
-        ));
-        reap_orphan_group(state, Duration::from_secs(settings.stop_timeout_seconds.max(1)))
-            .map_err(Failed::from)?;
+        prefix.marker(&format!("CLEANING UP LEFTOVER PROCESS GROUP (pgid {pgid})"));
+        reap_orphan_group(
+            state,
+            Duration::from_secs(settings.stop_timeout_seconds.max(1)),
+        )
+        .map_err(Failed::from)?;
     }
     let current = previous.clone().filter(|s| s.runner_live());
 
@@ -246,19 +241,23 @@ fn start_one(
         "--generation".to_string(),
         generation.to_string(),
     ];
+    // Clear the previous session even if the runner fails before opening its
+    // own logs, so an early startup error cannot replay stale console output.
+    std::fs::write(project.console_log(name), []).map_err(|err| {
+        Failed::new(
+            exit::GENERIC,
+            format!("cannot reset console log for {name}: {err}"),
+        )
+    })?;
     // The runner's own stderr joins the console stream, so a failure to start
     // is visible to whoever is watching.
-    let runner_pid = proc::spawn_detached(&exe, &args, Some(&project.console_stderr(name)))
+    let runner_pid = proc::spawn_detached(&exe, &args, Some(&project.console_log(name)))
         .map_err(Failed::from)?;
 
     // Follow the console stream: markers, build output and (until readiness)
     // run output. The runner truncates it before publishing its state, so we
     // wait for our generation and only then start reading from the beginning.
-    let mut relay = LogRelay::new(
-        project.console_stdout(name),
-        project.console_stderr(name),
-        prefix.label.clone(),
-    );
+    let mut relay = LogRelay::new(project.console_log(name), prefix.label.clone());
 
     let started = Instant::now();
     // Give the runner a moment to publish its first state record (it truncates
@@ -279,7 +278,7 @@ fn start_one(
     }
     // Even when the runner never published (it failed to start), its stderr went
     // to the console stream: read it so the failure is visible.
-    relay.seek(0, 0).map_err(Failed::from)?;
+    relay.seek(0).map_err(Failed::from)?;
 
     loop {
         relay.pump().map_err(Failed::from)?;
@@ -349,9 +348,7 @@ fn settle(state: &State) -> Result<Started, Failed> {
             exit::RUN_FAILED,
             "running failed (exited right after the probe passed)",
         )),
-        Phase::ProbeFailed => {
-            Err(Failed::new(exit::PROBE_FAILED, "probe failed"))
-        }
+        Phase::ProbeFailed => Err(Failed::new(exit::PROBE_FAILED, "probe failed")),
         Phase::ConfigFailed => Err(Failed::new(
             exit::CONFIG,
             "configuration error (see the CONFIG FAILED marker)",

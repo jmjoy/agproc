@@ -33,8 +33,7 @@ struct ServiceInfo {
     probe_kind: String,
     probe_target: String,
     cwd: String,
-    log_stdout: String,
-    log_stderr: String,
+    log_path: String,
 }
 
 #[derive(Serialize)]
@@ -134,8 +133,7 @@ fn service_infos(project: &Project, config: &Config) -> Vec<ServiceInfo> {
             probe_kind: service.target().kind_str().to_string(),
             probe_target: service.target().describe(),
             cwd: service.cwd_path(project).display().to_string(),
-            log_stdout: project.log_stdout(&service.name).display().to_string(),
-            log_stderr: project.log_stderr(&service.name).display().to_string(),
+            log_path: project.log_path(&service.name).display().to_string(),
         })
         .collect()
 }
@@ -144,10 +142,7 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
     let mut out = String::new();
     out.push_str("## This project\n\n");
     out.push_str(&format!("- project root: `{}`\n", project.root.display()));
-    out.push_str(&format!(
-        "- config: `{}`\n",
-        project.config_path.display()
-    ));
+    out.push_str(&format!("- config: `{}`\n", project.config_path.display()));
     out.push_str(&format!("- agproc: `{}`\n\n", env!("CARGO_PKG_VERSION")));
 
     out.push_str("| service | build-cmd | run-cmd | probe | run-cmd logs |\n");
@@ -164,7 +159,7 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
             _ => format!("`{}`", target.describe()),
         };
         out.push_str(&format!(
-            "| `{}` | {} | `{}` | {} | `.agproc/logs/{}.stdout.log` |\n",
+            "| `{}` | {} | `{}` | {} | `.agproc/logs/{}.log` |\n",
             service.name,
             build,
             service.run_cmd.display(),
@@ -268,14 +263,20 @@ probe = { tcp-connect = { port = 5173 } }
         let section = project_section(&project, &loaded);
         assert!(section.contains(r#"`["cargo", "build"]`"#), "{section}");
         assert!(section.contains(r#"`["./target/debug/api"]`"#), "{section}");
-        assert!(section.contains("http://127.0.0.1:3000/healthz"), "{section}");
+        assert!(
+            section.contains("http://127.0.0.1:3000/healthz"),
+            "{section}"
+        );
         assert!(section.contains("`agproc restart frontend`"), "{section}");
-        assert!(section.contains(".agproc/logs/backend.stdout.log"), "{section}");
+        assert!(section.contains(".agproc/logs/backend.log"), "{section}");
     }
 
     #[test]
     fn core_guide_has_the_marker_and_key_contract() {
-        assert!(CORE.contains(PROJECT_MARKER), "marker missing from the guide");
+        assert!(
+            CORE.contains(PROJECT_MARKER),
+            "marker missing from the guide"
+        );
         for needle in [
             "===== ALREADY RUNNING",
             "agproc restart",
@@ -301,7 +302,7 @@ probe = { tcp-connect = { port = 5173 } }
         assert_eq!(infos[0].run_cmd, ["sleep", "1"]);
         assert_eq!(infos[0].build_cmd, None);
         assert_eq!(infos[0].probe_kind, "none");
-        assert!(infos[0].log_stdout.ends_with("api.stdout.log"));
+        assert!(infos[0].log_path.ends_with("api.log"));
         // A service without an env-file carries no `env_file` key at all.
         assert_eq!(infos[0].env_file, None);
     }
@@ -318,7 +319,13 @@ probe = { tcp-connect = { port = 5173 } }
         let infos = service_infos(&project, &loaded.config);
         assert_eq!(
             infos[0].env_file.as_deref(),
-            Some(dir.path().join("config/dev.env").display().to_string().as_str())
+            Some(
+                dir.path()
+                    .join("config/dev.env")
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
         );
 
         let section = project_section(&project, &loaded);

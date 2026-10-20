@@ -118,6 +118,9 @@ pub struct ProbeState {
 #[serde(rename_all = "kebab-case")]
 pub struct State {
     pub schema: u32,
+    /// Missing in records from runners that captured separate stdout/stderr.
+    #[serde(default)]
+    pub log_layout: u32,
     pub service: String,
     pub generation: u64,
     pub phase: Phase,
@@ -145,6 +148,7 @@ impl State {
     pub fn new(service: &str, generation: u64, config_hash: &str) -> Self {
         Self {
             schema: SCHEMA,
+            log_layout: crate::paths::LAYOUT_VERSION,
             service: service.to_string(),
             generation,
             phase: Phase::Stopped,

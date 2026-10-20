@@ -203,7 +203,10 @@ mod tests {
         let result = attempt(&http_target(port), Duration::from_millis(300));
         assert!(result.is_err(), "{result:?}");
         assert!(start.elapsed() < Duration::from_secs(3));
-        assert!(result.unwrap_err().contains("timed out"), "unexpected reason");
+        assert!(
+            result.unwrap_err().contains("timed out"),
+            "unexpected reason"
+        );
     }
 
     #[test]

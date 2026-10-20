@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "agproc.toml";
 pub const AGPROC_DIR: &str = ".agproc";
-/// Bumped whenever the on-disk meaning changes; a mismatch makes agproc treat
-/// the directory as having no usable history instead of misreading it.
-pub const LAYOUT_VERSION: u32 = 1;
+/// Bumped whenever log paths or their meaning change. State records have their
+/// own schema so an older runner can still be stopped or restarted.
+pub const LAYOUT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -100,23 +100,15 @@ impl Project {
         self.agproc_dir().join("tmp")
     }
 
-    pub fn log_stdout(&self, service: &str) -> PathBuf {
-        self.logs_dir().join(format!("{service}.stdout.log"))
-    }
-
-    pub fn log_stderr(&self, service: &str) -> PathBuf {
-        self.logs_dir().join(format!("{service}.stderr.log"))
+    pub fn log_path(&self, service: &str) -> PathBuf {
+        self.logs_dir().join(format!("{service}.log"))
     }
 
     /// Transient console stream of a session: the markers agproc prints, the
     /// build-cmd output, and run output until readiness settles. `agproc start`
     /// forwards it live; `agproc logs` never reads it.
-    pub fn console_stdout(&self, service: &str) -> PathBuf {
-        self.tmp_dir().join(format!("{service}.console.stdout"))
-    }
-
-    pub fn console_stderr(&self, service: &str) -> PathBuf {
-        self.tmp_dir().join(format!("{service}.console.stderr"))
+    pub fn console_log(&self, service: &str) -> PathBuf {
+        self.tmp_dir().join(format!("{service}.console.log"))
     }
 
     pub fn state_path(&self, service: &str) -> PathBuf {
@@ -148,13 +140,38 @@ impl Project {
         }
         let version = self.version_path();
         if !version.exists() {
-            let body = format!(
-                "layout = {LAYOUT_VERSION}\nagproc = {}\n",
-                env!("CARGO_PKG_VERSION")
-            );
-            crate::util::write_atomic(&version, &self.tmp_dir(), body.as_bytes())?;
+            self.record_log_layout()?;
         }
         Ok(())
+    }
+
+    /// Record the layout once a new session has created its combined logs.
+    /// Merely stopping an older runner must not claim its logs were converted.
+    pub fn record_log_layout(&self) -> Result<()> {
+        let body = format!(
+            "layout = {LAYOUT_VERSION}\nagproc = {}\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        crate::util::write_atomic(&self.version_path(), &self.tmp_dir(), body.as_bytes())
+    }
+
+    pub fn legacy_log_warning(&self, service: &str) -> Option<String> {
+        let legacy_session = crate::state::load(&self.state_path(service))
+            .state
+            .is_some_and(|state| state.log_layout < LAYOUT_VERSION);
+        let legacy_files = !self.log_path(service).exists()
+            && ["stdout", "stderr"].iter().any(|stream| {
+                self.logs_dir()
+                    .join(format!("{service}.{stream}.log"))
+                    .exists()
+            });
+        if !legacy_session && !legacy_files {
+            return None;
+        }
+        Some(format!(
+            "{service} has legacy split logs; run `agproc restart {service}` to create \
+             its combined log. The old log files are kept for direct inspection"
+        ))
     }
 
     /// Warning to print when the directory was written by an incompatible
@@ -169,8 +186,9 @@ impl Project {
             return None;
         }
         Some(format!(
-            "{} was written by an incompatible agproc (layout {layout}, this build expects {LAYOUT_VERSION}); \
-             history in it is ignored",
+            "{} uses log layout {layout} (this build uses {LAYOUT_VERSION}); \
+             restart existing services to create combined logs. Old log files are kept; \
+             existing process state can still be used by stop/restart",
             self.agproc_dir().display()
         ))
     }

@@ -1,6 +1,6 @@
 //! Command line surface and top-level error reporting.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,7 +22,13 @@ use crate::runner;
 )]
 pub struct Cli {
     /// Path to agproc.toml (default: search this directory and its parents)
-    #[arg(short = 'C', long, global = true, env = "AGPROC_CONFIG", value_name = "PATH")]
+    #[arg(
+        short = 'C',
+        long,
+        global = true,
+        env = "AGPROC_CONFIG",
+        value_name = "PATH"
+    )]
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -85,24 +91,13 @@ pub struct LogsArgs {
     #[arg(value_name = "SERVICE")]
     pub services: Vec<String>,
 
-    /// Only the last N lines of each stream
+    /// Only the last N lines of each service's combined log
     #[arg(long, value_name = "N")]
     pub tail: Option<usize>,
 
     /// Keep printing new output; returns when the service stops
     #[arg(short = 'f', long)]
     pub follow: bool,
-
-    /// Which stream to show
-    #[arg(long, value_enum, default_value_t = StreamArg::Both)]
-    pub stream: StreamArg,
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamArg {
-    Both,
-    Stdout,
-    Stderr,
 }
 
 #[derive(Args, Debug)]
@@ -274,11 +269,6 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
                     services: args.services,
                     tail: args.tail,
                     follow: args.follow,
-                    stream: match args.stream {
-                        StreamArg::Both => logs::Stream::Both,
-                        StreamArg::Stdout => logs::Stream::Stdout,
-                        StreamArg::Stderr => logs::Stream::Stderr,
-                    },
                 },
             )
         }
@@ -286,9 +276,8 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
 }
 
 fn open(explicit: Option<&std::path::Path>) -> Result<(Project, config::LoadedConfig), Failure> {
-    let project =
-        Project::discover(explicit).map_err(|err| Failure::config(format!("{err:#}")))?;
-    let loaded = config::load(&project.config_path)
-        .map_err(|err| Failure::config(format!("{err:#}")))?;
+    let project = Project::discover(explicit).map_err(|err| Failure::config(format!("{err:#}")))?;
+    let loaded =
+        config::load(&project.config_path).map_err(|err| Failure::config(format!("{err:#}")))?;
     Ok((project, loaded))
 }

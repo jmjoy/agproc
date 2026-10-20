@@ -211,7 +211,7 @@ run-cmd = ["sh", "-c", "echo serving-frontend; sleep 120"]
 }
 
 #[test]
-fn multi_service_prefixes_are_padded_and_shared_by_both_streams() {
+fn multi_service_prefixes_are_padded_for_combined_output() {
     let project = Project::new(
         r#"
 [settings]
@@ -240,12 +240,8 @@ run-cmd = ["sh", "-c", "echo out-frontend; sleep 120"]
         "a short service name must be padded:\n{stdout}"
     );
 
-    // stderr carries exactly the stdout prefix: no textual stream marker.
-    has(&stderr, "backend  | err-backend");
-    assert!(
-        !stderr.contains("stderr | "),
-        "stderr lines must not be labelled:\n{stderr}"
-    );
+    has(&stdout, "backend  | err-backend");
+    assert!(stderr.is_empty(), "unexpected diagnostics:\n{stderr}");
 
     let (code, text) = project.combined(&["stop"]);
     assert_eq!(code, 0, "{text}");
@@ -266,13 +262,18 @@ run-cmd = ["sh", "-c", "echo serve-run; sleep 120"]
 
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "{text}");
-    let first_pid = project.state("api")["child-pid"].as_u64().expect("child pid");
+    let first_pid = project.state("api")["child-pid"]
+        .as_u64()
+        .expect("child pid");
 
     // A second start must not rebuild, restart or complain.
     let (code, text) = project.combined(&["start", "api"]);
     assert_eq!(code, 0, "{text}");
     has(&text, "===== ALREADY RUNNING");
-    assert!(!text.contains("BUILDING"), "start rebuilt an running service:\n{text}");
+    assert!(
+        !text.contains("BUILDING"),
+        "start rebuilt an running service:\n{text}"
+    );
     assert_eq!(
         project.state("api")["child-pid"].as_u64(),
         Some(first_pid),
@@ -287,7 +288,9 @@ run-cmd = ["sh", "-c", "echo serve-run; sleep 120"]
     assert!(stopped < building, "restart did not stop first:\n{text}");
     has(&text, "===== BUILD SUCCEED =====");
     has(&text, "===== PROBE PASSED");
-    let second_pid = project.state("api")["child-pid"].as_u64().expect("child pid");
+    let second_pid = project.state("api")["child-pid"]
+        .as_u64()
+        .expect("child pid");
     assert_ne!(first_pid, second_pid, "restart kept the old process");
 }
 
@@ -296,32 +299,55 @@ run-cmd = ["sh", "-c", "echo serve-run; sleep 120"]
 // ---------------------------------------------------------------------------
 
 #[test]
-fn stdout_and_stderr_stay_separate() {
+fn stdout_and_stderr_share_one_pty_and_replay_in_order() {
     let project = Project::new(
         r#"
 [[service]]
 name = "chatty"
-run-cmd = ["sh", "-c", "echo only-on-stdout; echo only-on-stderr >&2; sleep 120"]
+build-cmd = ["sh", "-c", "test -t 1 && test -t 2; echo build-out; echo build-err >&2; echo build-last"]
+run-cmd = ["sh", "-c", "test -t 1 && test -t 2; echo run-out; echo run-err >&2; printf run-last; sleep 120"]
 "#,
     );
 
     let output = project.agproc(&["start"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    has(&stdout, "only-on-stdout");
-    has(&stderr, "only-on-stderr");
     assert!(
-        !stdout.contains("only-on-stderr"),
-        "stderr leaked into stdout:\n{stdout}"
+        output.stderr.is_empty(),
+        "unexpected diagnostics: {:?}",
+        output.stderr
     );
-    assert!(
-        !stderr.contains("only-on-stdout"),
-        "stdout leaked into stderr:\n{stderr}"
-    );
-    // agproc's own narrative stays on stdout.
+    has(&stdout, "build-out\nbuild-err\nbuild-last\n");
+    has(&stdout, "run-out\nrun-err\nrun-last");
     has(&stdout, "===== PROBE PASSED");
+
+    assert_eq!(
+        project.read(".agproc/logs/chatty.log"),
+        "run-out\nrun-err\nrun-last"
+    );
+    let output = project.agproc(&["logs", "chatty"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"run-out\nrun-err\nrun-last\n");
+    assert!(output.stderr.is_empty());
+
+    let output = project.agproc(&["logs", "chatty", "--tail", "2"]);
+    assert_eq!(output.stdout, b"run-err\nrun-last\n");
+    assert!(output.stderr.is_empty());
+    let output = project.agproc(&["logs", "chatty", "--tail", "0"]);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    for path in [
+        ".agproc/logs/chatty.stdout.log",
+        ".agproc/logs/chatty.stderr.log",
+        ".agproc/tmp/chatty.console.stdout",
+        ".agproc/tmp/chatty.console.stderr",
+    ] {
+        assert!(
+            !project.file(path).exists(),
+            "split log was created: {path}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +439,10 @@ probe = {{ http-get = {{ port = {port}, path = "/healthz" }}, initial-delay-seco
     ));
 
     let (code, text) = project.combined(&["start"]);
-    assert_eq!(code, 6, "a foreign listener must not count as ready:\n{text}");
+    assert_eq!(
+        code, 6,
+        "a foreign listener must not count as ready:\n{text}"
+    );
     has(&text, "===== WARNING: PORT");
     has(&text, "ALREADY IN USE BY");
     has(&text, "is owned by");
@@ -523,7 +552,9 @@ run-cmd = ["sh", "-c", "echo serving; sleep 120"]
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "{text}");
 
-    let runner = project.state("api")["runner-pid"].as_u64().expect("runner pid");
+    let runner = project.state("api")["runner-pid"]
+        .as_u64()
+        .expect("runner pid");
     let killed = Command::new("kill")
         .args(["-9", &runner.to_string()])
         .status()
@@ -536,7 +567,10 @@ run-cmd = ["sh", "-c", "echo serving; sleep 120"]
 
     // Recovery: start must reap the leftover process group and succeed.
     let (code, text) = project.combined(&["start", "api"]);
-    assert_eq!(code, 0, "start did not recover from a killed runner:\n{text}");
+    assert_eq!(
+        code, 0,
+        "start did not recover from a killed runner:\n{text}"
+    );
     assert_eq!(project.ps_json()["services"][0]["phase"], "running");
 }
 
@@ -681,18 +715,19 @@ run-cmd = ["sh", "-c", "i=0; while true; do echo out-$$-$i; echo err-$$-$i >&2; 
         "agproc markers leaked into `logs`:\n{text}"
     );
 
-    let (_, tailed) = project.combined(&["logs", "ticker", "--stream", "stdout", "--tail", "1"]);
-    assert_eq!(tailed.lines().filter(|l| !l.is_empty()).count(), 1, "{tailed}");
+    let (_, tailed) = project.combined(&["logs", "ticker", "--tail", "1"]);
+    assert_eq!(
+        tailed.lines().filter(|l| !l.is_empty()).count(),
+        1,
+        "{tailed}"
+    );
 
-    // Stream filtering still works, and the streams stay separate.
-    let output = project.agproc(&["logs", "ticker", "--stream", "stdout"]);
+    // Both original streams are replayed to stdout.
+    let output = project.agproc(&["logs", "ticker"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     has(&stdout, "out-");
-    assert!(!stdout.contains("err-"), "stderr leaked into stdout:\n{stdout}");
-    let output = project.agproc(&["logs", "ticker", "--stream", "stderr"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    has(&stderr, "err-");
-    assert!(!stderr.contains("out-"), "stdout leaked into stderr:\n{stderr}");
+    has(&stdout, "err-");
+    assert!(output.stderr.is_empty());
 
     // A restart starts a new run-cmd: the previous one's output is gone.
     let (code, text) = project.combined(&["restart", "ticker"]);
@@ -740,6 +775,147 @@ run-cmd = ["sleep", "120"]
 }
 
 #[test]
+fn logs_stream_filter_is_removed() {
+    let project = Project::new("[[service]]\nname = \"api\"\nrun-cmd = [\"true\"]\n");
+    for stream in ["both", "stdout", "stderr"] {
+        let output = project.agproc(&["logs", "--stream", stream]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        has(&String::from_utf8_lossy(&output.stderr), "--stream");
+    }
+}
+
+#[test]
+fn log_read_errors_and_layout_warnings_use_stderr() {
+    let project = Project::new("[[service]]\nname = \"api\"\nrun-cmd = [\"true\"]\n");
+    std::fs::create_dir_all(project.file(".agproc/logs")).unwrap();
+    project.write(".agproc/logs/api.log", "service-out\nservice-err\n");
+    project.write(".agproc/version", "layout = 1\nagproc = 0.3.0\n");
+
+    let output = project.agproc(&["logs", "api"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"service-out\nservice-err\n");
+    has(&String::from_utf8_lossy(&output.stderr), "WARNING:");
+
+    // A directory at the log path produces an actual I/O error on replay
+    // and follow; diagnostics must not become log content on stdout.
+    std::fs::remove_file(project.file(".agproc/logs/api.log")).unwrap();
+    std::fs::create_dir(project.file(".agproc/logs/api.log")).unwrap();
+    for args in [vec!["logs", "api"], vec!["logs", "api", "-f"]] {
+        let output = project.agproc(&args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        has(&String::from_utf8_lossy(&output.stderr), "ERROR");
+        has(&String::from_utf8_lossy(&output.stderr), "api.log");
+    }
+
+    let output = project.agproc(&["logs", "unknown"]);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    has(&String::from_utf8_lossy(&output.stderr), "unknown service");
+}
+
+#[test]
+fn legacy_log_layout_keeps_process_state_and_switches_on_restart() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = ["sh", "-c", "echo run-out; echo run-err >&2; sleep 120"]
+"#,
+    );
+    let (code, text) = project.combined(&["start"]);
+    assert_eq!(code, 0, "{text}");
+    let first_pid = project.state("api")["child-pid"].as_u64().unwrap();
+
+    // Reproduce the old state schema and split paths without an older binary.
+    // A stale combined log deliberately remains to ensure it is not replayed.
+    let mut state = project.state("api");
+    state.as_object_mut().unwrap().remove("log-layout");
+    project.write(
+        ".agproc/state/api.json",
+        &serde_json::to_string(&state).unwrap(),
+    );
+    project.write(".agproc/logs/api.stdout.log", "old-out\n");
+    project.write(".agproc/logs/api.stderr.log", "old-err\n");
+    project.write(".agproc/version", "layout = 1\nagproc = 0.3.0\n");
+
+    let output = project.agproc(&["ps", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let ps: Value = serde_json::from_slice(&output.stdout).expect("clean ps JSON");
+    assert_eq!(ps["services"][0]["phase"], "running");
+    assert_eq!(ps["services"][0]["pid"], first_pid);
+    has(&String::from_utf8_lossy(&output.stderr), "WARNING:");
+
+    let output = project.agproc(&["start", "api"]);
+    assert_eq!(output.status.code(), Some(0));
+    has(&String::from_utf8_lossy(&output.stdout), "ALREADY RUNNING");
+    assert_eq!(project.state("api")["child-pid"], first_pid);
+    for args in [vec!["logs", "api"], vec!["logs", "api", "-f"]] {
+        let output = project.agproc(&args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            output.stdout.is_empty(),
+            "stale combined output was replayed"
+        );
+        has(
+            &String::from_utf8_lossy(&output.stderr),
+            "agproc restart api",
+        );
+    }
+
+    let output = project.agproc(&["restart", "api"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_ne!(project.state("api")["child-pid"], first_pid);
+    assert_eq!(project.state("api")["log-layout"], 2);
+    has(&project.read(".agproc/version"), "layout = 2");
+    assert_eq!(project.read(".agproc/logs/api.stdout.log"), "old-out\n");
+    assert_eq!(project.read(".agproc/logs/api.stderr.log"), "old-err\n");
+    let output = project.agproc(&["logs", "api"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"run-out\nrun-err\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn json_reports_expose_one_complete_log_path() {
+    let project = Project::new("[[service]]\nname = \"api\"\nrun-cmd = [\"true\"]\n");
+    for command in ["ps", "skills"] {
+        let output = project.agproc(&[command, "--json"]);
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let service = &report["services"][0];
+        assert_eq!(
+            service["log_path"],
+            project.file(".agproc/logs/api.log").display().to_string()
+        );
+        assert!(service.get("log_stdout").is_none());
+        assert!(service.get("log_stderr").is_none());
+    }
+    let output = project.agproc(&["skills"]);
+    let guide = String::from_utf8_lossy(&output.stdout);
+    has(&guide, ".agproc/logs/api.log");
+    assert!(!guide.contains(".agproc/logs/api.stdout.log"));
+}
+
+#[test]
+fn an_early_runner_failure_uses_the_combined_console_log() {
+    let project = Project::new("[[service]]\nname = \"api\"\nrun-cmd = [\"sleep\", \"120\"]\n");
+    std::fs::create_dir_all(project.file(".agproc/logs/api.log")).unwrap();
+    std::fs::create_dir_all(project.file(".agproc/tmp")).unwrap();
+    project.write(".agproc/tmp/api.console.log", "stale-console-output\n");
+
+    let output = project.agproc(&["start", "api"]);
+    assert_eq!(output.status.code(), Some(1));
+    let console = project.read(".agproc/tmp/api.console.log");
+    has(&console, "RUNNER ERROR");
+    has(&console, "api.log");
+    has(&String::from_utf8_lossy(&output.stdout), "RUNNER ERROR");
+    assert!(!console.contains("stale-console-output"));
+}
+
+#[test]
 fn build_output_is_shown_live_and_kept_out_of_the_logs() {
     let project = Project::new(
         r#"
@@ -764,10 +940,9 @@ run-cmd = ["sleep", "120"]
 
     // …but the transient console stream keeps it (failure paths are not cleaned
     // up), so a failed build stays diagnosable.
-    let console = project.read(".agproc/tmp/badbuild.console.stdout");
+    let console = project.read(".agproc/tmp/badbuild.console.log");
     has(&console, "compile-error");
-    let console_err = project.read(".agproc/tmp/badbuild.console.stderr");
-    has(&console_err, "compile-error-on-stderr");
+    has(&console, "compile-error\ncompile-error-on-stderr\n");
 }
 
 #[test]
@@ -784,8 +959,8 @@ run-cmd = ["sh", "-c", "i=0; while true; do echo tick-$i; i=$((i+1)); sleep 0.05
 
     // Let the runner notice that readiness settled.
     std::thread::sleep(Duration::from_millis(400));
-    let console = project.file(".agproc/tmp/ticker.console.stdout");
-    let log = project.file(".agproc/logs/ticker.stdout.log");
+    let console = project.file(".agproc/tmp/ticker.console.log");
+    let log = project.file(".agproc/logs/ticker.log");
     let size = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let console_before = size(&console);
     let log_before = size(&log);
@@ -887,7 +1062,10 @@ probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-
 "#
     ));
     let (code, text) = project.combined(&["start"]);
-    assert_eq!(code, 0, "a service listening on its own port must be ready:\n{text}");
+    assert_eq!(
+        code, 0,
+        "a service listening on its own port must be ready:\n{text}"
+    );
     has(&text, "===== PROBE PASSED");
     assert_eq!(project.ps_json()["services"][0]["phase"], "running");
     let _ = project.agproc(&["stop"]);
@@ -952,7 +1130,11 @@ fn init_writes_a_template_and_gitignore_entry() {
         .args(["init"])
         .output()
         .expect("init again");
-    assert_ne!(again.status.code(), Some(0), "init overwrote without --force");
+    assert_ne!(
+        again.status.code(),
+        Some(0),
+        "init overwrote without --force"
+    );
 }
 
 #[test]
@@ -1113,7 +1295,7 @@ run-cmd = ["sleep", "120"]
     assert_eq!(ps["services"][0]["phase"], "config-failed", "{ps}");
 
     // The console stream keeps the reason, as it does for a failed build.
-    let console = project.read(".agproc/tmp/api.console.stdout");
+    let console = project.read(".agproc/tmp/api.console.log");
     has(&console, "cannot read env-file");
 }
 
@@ -1182,7 +1364,7 @@ run-cmd = ["sh", "-c", "echo value-$FROM_FILE; sleep 120"]
     let _ = project.agproc(&["stop"]);
 }
 #[test]
-fn logs_tail_follow_replays_each_stream_per_service_and_stops() {
+fn logs_tail_follow_replays_combined_tail_per_service_and_stops() {
     let project = Project::new(
         r#"
 [[service]]
@@ -1198,13 +1380,8 @@ run-cmd = ["sh", "-c", "for i in 1 2 3; do echo worker-out-old-$i; echo worker-e
     assert_eq!(code, 0, "{text}");
     wait_for("tail-follow history", || {
         ["api", "worker"].iter().all(|service| {
-            std::fs::read_to_string(project.file(&format!(".agproc/logs/{service}.stdout.log")))
-                .map(|logs| logs.contains(&format!("{service}-out-old-3")))
-                .unwrap_or(false)
-                && std::fs::read_to_string(
-                    project.file(&format!(".agproc/logs/{service}.stderr.log")),
-                )
-                .map(|logs| logs.contains(&format!("{service}-err-old-3")))
+            std::fs::read_to_string(project.file(&format!(".agproc/logs/{service}.log")))
+                .map(|logs| logs.contains(&format!("{service}-out-old-3\n{service}-err-old-3\n")))
                 .unwrap_or(false)
         })
     });
@@ -1222,7 +1399,7 @@ run-cmd = ["sh", "-c", "for i in 1 2 3; do echo worker-out-old-$i; echo worker-e
 
     wait_for_follow_lines(
         &ready_rx,
-        &["api    | api-out-old-2", "worker | worker-out-old-2"],
+        &["api    | api-out-old-3", "worker | worker-out-old-3"],
     );
     project.write(".release-tail-follow", "");
 
@@ -1238,29 +1415,28 @@ run-cmd = ["sh", "-c", "for i in 1 2 3; do echo worker-out-old-$i; echo worker-e
     for service in ["api", "worker"] {
         assert!(
             !stdout.contains(&format!("{service}-out-old-1")),
-            "older stdout history leaked:\n{stdout}"
+            "{stdout}"
         );
         assert!(
-            !stderr.contains(&format!("{service}-err-old-1")),
-            "older stderr history leaked:\n{stderr}"
+            !stdout.contains(&format!("{service}-err-old-1")),
+            "{stdout}"
         );
-        has(&stdout, &format!("{service}-out-old-2"));
+        assert!(
+            !stdout.contains(&format!("{service}-out-old-2")),
+            "{stdout}"
+        );
+        assert!(
+            !stdout.contains(&format!("{service}-err-old-2")),
+            "{stdout}"
+        );
         has(&stdout, &format!("{service}-out-old-3"));
+        has(&stdout, &format!("{service}-err-old-3"));
         has(&stdout, &format!("{service}-out-live"));
-        has(&stderr, &format!("{service}-err-old-2"));
-        has(&stderr, &format!("{service}-err-old-3"));
-        has(&stderr, &format!("{service}-err-live"));
+        has(&stdout, &format!("{service}-err-live"));
     }
-    has(&stdout, "api    | api-out-old-2");
-    has(&stdout, "worker | worker-out-old-2");
-    assert!(
-        !stdout.contains("-err-"),
-        "stderr leaked into stdout:\n{stdout}"
-    );
-    assert!(
-        !stderr.contains("-out-"),
-        "stdout leaked into stderr:\n{stderr}"
-    );
+    has(&stdout, "api    | api-out-old-3");
+    has(&stdout, "worker | worker-out-old-3");
+    assert!(stderr.is_empty(), "unexpected diagnostics:\n{stderr}");
 }
 
 #[test]
@@ -1275,12 +1451,9 @@ run-cmd = ["sh", "-c", "for i in 1 2; do echo zero-out-old-$i; echo zero-err-old
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "{text}");
     wait_for("tail-zero history", || {
-        std::fs::read_to_string(project.file(".agproc/logs/zero.stdout.log"))
-            .map(|logs| logs.contains("zero-out-old-2"))
+        std::fs::read_to_string(project.file(".agproc/logs/zero.log"))
+            .map(|logs| logs.contains("zero-out-old-2\nzero-err-old-2\n"))
             .unwrap_or(false)
-            && std::fs::read_to_string(project.file(".agproc/logs/zero.stderr.log"))
-                .map(|logs| logs.contains("zero-err-old-2"))
-                .unwrap_or(false)
     });
 
     let dir = project.path().to_path_buf();
@@ -1309,43 +1482,34 @@ run-cmd = ["sh", "-c", "for i in 1 2; do echo zero-out-old-$i; echo zero-err-old
         "historical stdout leaked:\n{stdout}"
     );
     assert!(
-        !stderr.contains("zero-err-old-"),
-        "historical stderr leaked:\n{stderr}"
+        !stdout.contains("zero-err-old-"),
+        "historical stderr leaked:\n{stdout}"
     );
     has(&stdout, "zero-out-live-10");
-    has(&stderr, "zero-err-live-10");
-    assert!(
-        !stdout.contains("zero-err-"),
-        "stderr leaked into stdout:\n{stdout}"
-    );
-    assert!(
-        !stderr.contains("zero-out-"),
-        "stdout leaked into stderr:\n{stderr}"
-    );
+    has(&stdout, "zero-err-live-10");
+    assert!(stderr.is_empty(), "unexpected diagnostics:\n{stderr}");
 }
 
 #[test]
-fn logs_tail_follow_respects_stream_filter() {
+fn logs_tail_follow_flushes_combined_partial_final_line() {
     let project = Project::new(
         r#"
 [[service]]
 name = "filtered"
-run-cmd = ["sh", "-c", "for i in 1 2; do echo filtered-out-old-$i; echo filtered-err-old-$i >&2; done; while [ ! -e .release-filtered ]; do sleep 0.02; done; echo filtered-out-live; echo filtered-err-live >&2"]
+run-cmd = ["sh", "-c", "for i in 1 2; do echo filtered-out-old-$i; echo filtered-err-old-$i >&2; done; while [ ! -e .release-filtered ]; do sleep 0.02; done; printf filtered-out-live; printf -- -and-err >&2"]
 "#,
     );
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "{text}");
     wait_for("filtered history", || {
-        std::fs::read_to_string(project.file(".agproc/logs/filtered.stdout.log"))
-            .map(|logs| logs.contains("filtered-out-old-2"))
+        std::fs::read_to_string(project.file(".agproc/logs/filtered.log"))
+            .map(|logs| logs.contains("filtered-err-old-2"))
             .unwrap_or(false)
     });
 
     let mut child = Command::new(bin())
         .current_dir(project.path())
-        .args([
-            "logs", "filtered", "--tail", "1", "-f", "--stream", "stdout",
-        ])
+        .args(["logs", "filtered", "--tail", "1", "-f"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1354,7 +1518,7 @@ run-cmd = ["sh", "-c", "for i in 1 2; do echo filtered-out-old-$i; echo filtered
     let stdout_reader = collect_follow_stdout(child.stdout.take().expect("logs stdout"), ready_tx);
     let stderr_reader = collect_follow_stderr(child.stderr.take().expect("logs stderr"));
 
-    wait_for_follow_lines(&ready_rx, &["filtered-out-old-2"]);
+    wait_for_follow_lines(&ready_rx, &["filtered-err-old-2"]);
     project.write(".release-filtered", "");
 
     let status = child.wait().expect("wait for filtered logs");
@@ -1369,16 +1533,9 @@ run-cmd = ["sh", "-c", "for i in 1 2; do echo filtered-out-old-$i; echo filtered
         !stdout.contains("filtered-out-old-1"),
         "older stdout history leaked:\n{stdout}"
     );
-    has(&stdout, "filtered-out-old-2");
-    has(&stdout, "filtered-out-live");
-    assert!(
-        !stdout.contains("filtered-err-"),
-        "stderr leaked into stdout:\n{stdout}"
-    );
-    assert!(
-        stderr.is_empty(),
-        "stderr stream should be disabled:\n{stderr}"
-    );
+    assert!(!stdout.contains("filtered-out-old-2"), "{stdout}");
+    has(&stdout, "filtered-err-old-2\nfiltered-out-live-and-err\n");
+    assert!(stderr.is_empty(), "unexpected diagnostics:\n{stderr}");
 }
 
 #[test]
@@ -1393,14 +1550,14 @@ run-cmd = ["sh", "-c", "for i in 1 2 3; do echo full-out-old-$i; done; while [ !
     let (code, text) = project.combined(&["start"]);
     assert_eq!(code, 0, "{text}");
     wait_for("full-follow history", || {
-        std::fs::read_to_string(project.file(".agproc/logs/full.stdout.log"))
+        std::fs::read_to_string(project.file(".agproc/logs/full.log"))
             .map(|logs| logs.contains("full-out-old-3"))
             .unwrap_or(false)
     });
 
     let mut child = Command::new(bin())
         .current_dir(project.path())
-        .args(["logs", "full", "-f", "--stream", "stdout"])
+        .args(["logs", "full", "-f"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1427,10 +1584,7 @@ run-cmd = ["sh", "-c", "for i in 1 2 3; do echo full-out-old-$i; done; while [ !
     has(&stdout, "full-out-old-2");
     has(&stdout, "full-out-old-3");
     has(&stdout, "full-out-live");
-    assert!(
-        stderr.is_empty(),
-        "stderr stream should be disabled:\n{stderr}"
-    );
+    assert!(stderr.is_empty(), "unexpected diagnostics:\n{stderr}");
 }
 
 fn collect_follow_stdout(

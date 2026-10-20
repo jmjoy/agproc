@@ -110,7 +110,10 @@ pub fn pids_for_inodes(inodes: &[u64]) -> Vec<u32> {
             let Ok(target) = std::fs::read_link(fd.path()) else {
                 continue;
             };
-            if wanted.iter().any(|w| target.to_string_lossy() == w.as_str()) {
+            if wanted
+                .iter()
+                .any(|w| target.to_string_lossy() == w.as_str())
+            {
                 pids.push(pid);
                 break;
             }

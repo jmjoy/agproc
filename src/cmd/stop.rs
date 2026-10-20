@@ -40,8 +40,8 @@ pub fn run(project: &Project, config: &Config, services: Vec<&Service>) -> Resul
     if services.len() == 1 {
         let service = services[0];
         let prefix = Prefix::service(&service.name, width);
-        let outcome = stop_service(project, &settings, service, &prefix)
-            .map_err(|err| format!("{err:#}"));
+        let outcome =
+            stop_service(project, &settings, service, &prefix).map_err(|err| format!("{err:#}"));
         results.push((service.name.clone(), outcome));
     } else {
         let mut handles = Vec::new();
@@ -156,7 +156,11 @@ pub fn stop_service(
     }
     state::clear_stop_requested(project, name);
 
-    prefix.marker(if forced { "STOPPED (forced)" } else { "STOPPED" });
+    prefix.marker(if forced {
+        "STOPPED (forced)"
+    } else {
+        "STOPPED"
+    });
     Ok(if forced {
         StopOutcome::Forced
     } else {

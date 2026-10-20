@@ -83,7 +83,9 @@ pub fn verify(
     {
         return Ownership::ConfirmedForeign(to_listener(mine.clone()));
     }
-    Ownership::Unexpected(to_listener(listeners.into_iter().next().expect("non-empty")))
+    Ownership::Unexpected(to_listener(
+        listeners.into_iter().next().expect("non-empty"),
+    ))
 }
 
 #[cfg(test)]
@@ -126,7 +128,12 @@ mod tests {
         assert_eq!(before.pid, std::process::id());
 
         // A child group that does not contain the listener's process.
-        let ownership = verify(&http_target(port), &settings(true), 0x7fff_fffe, Some(&before));
+        let ownership = verify(
+            &http_target(port),
+            &settings(true),
+            0x7fff_fffe,
+            Some(&before),
+        );
         assert_eq!(ownership, Ownership::ConfirmedForeign(before));
         drop(listener);
     }
@@ -175,7 +182,10 @@ mod tests {
             path: "/".to_string(),
         };
         assert_eq!(preflight(&target, &settings(true)), None);
-        assert_eq!(verify(&target, &settings(true), 1, None), Ownership::Unknown);
+        assert_eq!(
+            verify(&target, &settings(true), 1, None),
+            Ownership::Unknown
+        );
     }
 
     #[test]

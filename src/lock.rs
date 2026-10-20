@@ -38,8 +38,9 @@ impl Lock {
                 Ok(Some(Self { _file: file }))
             }
             Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(err)) => Err(err)
-                .with_context(|| format!("cannot lock {}", path.display())),
+            Err(TryLockError::Error(err)) => {
+                Err(err).with_context(|| format!("cannot lock {}", path.display()))
+            }
         }
     }
 

@@ -81,38 +81,19 @@ impl LineBuffer {
 ///
 /// Two destinations exist per service:
 ///
-/// - **run logs** (`logs/<svc>.stdout.log`, `logs/<svc>.stderr.log`): what
+/// - **run log** (`logs/<svc>.log`): what
 ///   `agproc logs` replays. They hold run-cmd output only, and are truncated
 ///   when a session starts, so they always describe the last run-cmd.
-/// - **console stream** (`tmp/<svc>.console.stdout`, `tmp/<svc>.console.stderr`):
+/// - **console stream** (`tmp/<svc>.console.log`):
 ///   what `agproc start`/`restart` forwards live. It also carries agproc's own
 ///   `===== ... =====` markers and the build-cmd output, which are therefore
 ///   kept out of the run logs. It lives in `tmp/` because it is transient.
 pub struct LogSink {
-    run: LogPair,
-    console: LogPair,
+    run: SinkFile,
+    console: SinkFile,
     max_bytes: u64,
     write_run: bool,
     write_console: bool,
-}
-
-struct LogPair {
-    out: SinkFile,
-    err: SinkFile,
-}
-
-impl LogPair {
-    fn open(out_path: &Path, err_path: &Path) -> Result<Self> {
-        Ok(Self {
-            out: SinkFile::open(out_path)?,
-            err: SinkFile::open(err_path)?,
-        })
-    }
-
-    fn truncate(&mut self) -> Result<()> {
-        self.out.truncate()?;
-        self.err.truncate()
-    }
 }
 
 impl LogSink {
@@ -120,11 +101,11 @@ impl LogSink {
     /// empty logs, so nothing from a previous session can be mistaken for the
     /// current one.
     pub fn open(project: &Project, service: &str, max_bytes: u64) -> Result<Self> {
-        let mut run = LogPair::open(&project.log_stdout(service), &project.log_stderr(service))?;
-        let mut console =
-            LogPair::open(&project.console_stdout(service), &project.console_stderr(service))?;
+        let mut run = SinkFile::open(&project.log_path(service))?;
+        let mut console = SinkFile::open(&project.console_log(service))?;
         run.truncate()?;
         console.truncate()?;
+        project.record_log_layout()?;
         Ok(Self {
             run,
             console,
@@ -153,26 +134,15 @@ impl LogSink {
 
     pub fn marker(&mut self, text: &str) -> Result<()> {
         self.console
-            .out
             .write(marker_line(text).as_bytes(), self.max_bytes)
     }
 
-    pub fn write_stdout(&mut self, bytes: &[u8]) -> Result<()> {
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
         if self.write_run {
-            self.run.out.write(bytes, self.max_bytes)?;
+            self.run.write(bytes, self.max_bytes)?;
         }
         if self.write_console {
-            self.console.out.write(bytes, self.max_bytes)?;
-        }
-        Ok(())
-    }
-
-    pub fn write_stderr(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.write_run {
-            self.run.err.write(bytes, self.max_bytes)?;
-        }
-        if self.write_console {
-            self.console.err.write(bytes, self.max_bytes)?;
+            self.console.write(bytes, self.max_bytes)?;
         }
         Ok(())
     }
@@ -373,74 +343,42 @@ impl LogFollower {
     }
 }
 
-/// Relays both log files of one service to our own stdout/stderr, preserving
-/// the stream split and adding a prefix per line when several services are in
-/// scope. Both streams share that prefix; they stay apart by destination.
-/// Used by `agproc start` (live) and `agproc logs` (replay/follow).
+/// Relays one service's combined log to stdout, adding a prefix per line
+/// when several services are in scope. Used by `start` and `logs`.
 pub struct LogRelay {
-    out: LogFollower,
-    err: LogFollower,
-    out_lines: LineBuffer,
-    err_lines: LineBuffer,
+    follower: LogFollower,
+    lines: LineBuffer,
     prefix: String,
-    enabled_out: bool,
-    enabled_err: bool,
 }
 
 impl LogRelay {
-    pub fn new(out_path: PathBuf, err_path: PathBuf, prefix: String) -> Self {
+    pub fn new(path: PathBuf, prefix: String) -> Self {
         Self {
-            out: LogFollower::new(out_path),
-            err: LogFollower::new(err_path),
-            out_lines: LineBuffer::new(),
-            err_lines: LineBuffer::new(),
+            follower: LogFollower::new(path),
+            lines: LineBuffer::new(),
             prefix,
-            enabled_out: true,
-            enabled_err: true,
         }
     }
 
-    /// Restrict which streams are forwarded (used by `logs --stream`).
-    pub fn enable(&mut self, stdout: bool, stderr: bool) {
-        self.enabled_out = stdout;
-        self.enabled_err = stderr;
-    }
-
-    pub fn seek(&mut self, stdout: u64, stderr: u64) -> Result<()> {
-        self.out.seek_to(stdout)?;
-        self.err.seek_to(stderr)
+    pub fn seek(&mut self, offset: u64) -> Result<()> {
+        self.follower.seek_to(offset)
     }
 
     /// Forward everything appended since the last call.
     pub fn pump(&mut self) -> Result<bool> {
-        let mut any = false;
-        if self.enabled_out {
-            let stdout = self.out.read_new()?;
-            if !stdout.is_empty() {
-                any = true;
-                let prefix = self.prefix.clone();
-                self.out_lines
-                    .push(&stdout, |line| emit(false, &prefix, line));
-            }
+        let bytes = self.follower.read_new()?;
+        if bytes.is_empty() {
+            return Ok(false);
         }
-        if self.enabled_err {
-            let stderr = self.err.read_new()?;
-            if !stderr.is_empty() {
-                any = true;
-                let prefix = self.prefix.clone();
-                self.err_lines
-                    .push(&stderr, |line| emit(true, &prefix, line));
-            }
-        }
-        Ok(any)
+        let prefix = &self.prefix;
+        self.lines.push(&bytes, |line| emit(false, prefix, line));
+        Ok(true)
     }
 
     /// Emit any trailing partial line (called once when forwarding stops).
     pub fn flush(&mut self) {
-        let prefix = self.prefix.clone();
-        self.out_lines.flush(|line| emit(false, &prefix, line));
-        let prefix = self.prefix.clone();
-        self.err_lines.flush(|line| emit(true, &prefix, line));
+        let prefix = &self.prefix;
+        self.lines.flush(|line| emit(false, prefix, line));
     }
 }
 
@@ -494,18 +432,14 @@ mod tests {
 
         // Build phase: markers and build output go to the console stream only.
         sink.marker("BUILDING").unwrap();
-        sink.write_stdout(b"compiling\n").unwrap();
-        sink.write_stderr(b"warning: unused import\n").unwrap();
+        sink.write(b"compiling\n").unwrap();
+        sink.write(b"warning: unused import\n").unwrap();
         assert_eq!(
-            std::fs::read_to_string(project.console_stdout("svc")).unwrap(),
-            "===== BUILDING =====\ncompiling\n"
+            std::fs::read_to_string(project.console_log("svc")).unwrap(),
+            "===== BUILDING =====\ncompiling\nwarning: unused import\n"
         );
         assert_eq!(
-            std::fs::read_to_string(project.console_stderr("svc")).unwrap(),
-            "warning: unused import\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(project.log_stdout("svc")).unwrap(),
+            std::fs::read_to_string(project.log_path("svc")).unwrap(),
             ""
         );
 
@@ -513,30 +447,26 @@ mod tests {
         // settles, then only in the run logs.
         sink.begin_run().unwrap();
         sink.marker("RUNNING").unwrap();
-        sink.write_stdout(b"listening\n").unwrap();
-        sink.write_stderr(b"note\n").unwrap();
+        sink.write(b"listening\n").unwrap();
+        sink.write(b"note\n").unwrap();
         assert_eq!(
-            std::fs::read_to_string(project.log_stdout("svc")).unwrap(),
-            "listening\n"
+            std::fs::read_to_string(project.log_path("svc")).unwrap(),
+            "listening\nnote\n"
         );
         assert_eq!(
-            std::fs::read_to_string(project.log_stderr("svc")).unwrap(),
-            "note\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(project.console_stdout("svc")).unwrap(),
-            "===== BUILDING =====\ncompiling\n===== RUNNING =====\nlistening\n"
+            std::fs::read_to_string(project.console_log("svc")).unwrap(),
+            "===== BUILDING =====\ncompiling\nwarning: unused import\n===== RUNNING =====\nlistening\nnote\n"
         );
 
         sink.end_narrative();
         sink.marker("SERVICE EXITED (exit code 0)").unwrap();
-        sink.write_stdout(b"later\n").unwrap();
+        sink.write(b"later\n").unwrap();
         assert_eq!(
-            std::fs::read_to_string(project.log_stdout("svc")).unwrap(),
-            "listening\nlater\n"
+            std::fs::read_to_string(project.log_path("svc")).unwrap(),
+            "listening\nnote\nlater\n"
         );
         assert!(
-            !std::fs::read_to_string(project.console_stdout("svc"))
+            !std::fs::read_to_string(project.console_log("svc"))
                 .unwrap()
                 .contains("later"),
             "run output must stop being duplicated once readiness settled"
@@ -554,15 +484,15 @@ mod tests {
             let mut sink = LogSink::open(&project, "svc", 0).unwrap();
             sink.marker("BUILDING").unwrap();
             sink.begin_run().unwrap();
-            sink.write_stdout(b"previous run\n").unwrap();
+            sink.write(b"previous run\n").unwrap();
         }
         let mut sink = LogSink::open(&project, "svc", 0).unwrap();
         sink.begin_run().unwrap();
-        sink.write_stdout(b"current run\n").unwrap();
+        sink.write(b"current run\n").unwrap();
 
-        let logs = std::fs::read_to_string(project.log_stdout("svc")).unwrap();
+        let logs = std::fs::read_to_string(project.log_path("svc")).unwrap();
         assert_eq!(logs, "current run\n");
-        let console = std::fs::read_to_string(project.console_stdout("svc")).unwrap();
+        let console = std::fs::read_to_string(project.console_log("svc")).unwrap();
         assert_eq!(console, "current run\n");
     }
 
@@ -575,12 +505,12 @@ mod tests {
         };
         let mut sink = LogSink::open(&project, "svc", 16).unwrap();
         sink.begin_run().unwrap();
-        sink.write_stdout(b"0123456789\n").unwrap();
-        sink.write_stdout(b"abcdefghij\n").unwrap();
+        sink.write(b"0123456789\n").unwrap();
+        sink.write(b"abcdefghij\n").unwrap();
 
-        let rotated = dir.path().join(".agproc/logs/svc.stdout.log.1");
+        let rotated = dir.path().join(".agproc/logs/svc.log.1");
         assert!(rotated.exists());
-        let current = std::fs::read_to_string(project.log_stdout("svc")).unwrap();
+        let current = std::fs::read_to_string(project.log_path("svc")).unwrap();
         assert_eq!(current, "abcdefghij\n");
     }
 

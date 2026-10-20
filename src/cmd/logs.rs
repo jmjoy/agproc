@@ -2,8 +2,7 @@
 //!
 //! The run logs are truncated when a session starts, so the whole file is
 //! exactly the last run-cmd's output: no agproc markers, no build output, no
-//! earlier sessions. The two streams are replayed independently and keep their
-//! original destinations.
+//! earlier sessions. Child stdout and stderr share one log, replayed to stdout.
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -18,18 +17,10 @@ use crate::logstore::{LineBuffer, LogFollower, LogRelay, emit};
 use crate::paths::Project;
 use crate::state;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stream {
-    Both,
-    Stdout,
-    Stderr,
-}
-
 pub struct Request {
     pub services: Vec<String>,
     pub tail: Option<usize>,
     pub follow: bool,
-    pub stream: Stream,
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -54,9 +45,14 @@ fn install_interrupt_handler() {
 pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, Failure> {
     let services = select_services(config, &request.services).map_err(Failure::config)?;
     if let Some(warning) = project.layout_warning() {
-        Prefix::plain().marker(&format!("WARNING: {warning}"));
+        Prefix::plain().diagnostic(&format!("WARNING: {warning}"));
     }
     let width = prefix_width(services.iter().map(|service| service.name.as_str()));
+    for service in &services {
+        if let Some(warning) = project.legacy_log_warning(&service.name) {
+            return Err(Failure::generic(warning));
+        }
+    }
 
     if request.follow {
         install_interrupt_handler();
@@ -67,38 +63,26 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
     let mut printed_anything = false;
     for service in &services {
         let prefix = Prefix::service(&service.name, width);
-        let mut chunks: Vec<(bool, Vec<u8>)> = Vec::new();
-        if matches!(request.stream, Stream::Both | Stream::Stdout) {
-            let mut follower = LogFollower::new(project.log_stdout(&service.name));
-            follower.seek_to(0).map_err(Failure::from)?;
-            chunks.push((false, follower.read_new().map_err(Failure::from)?));
+        let mut follower = LogFollower::new(project.log_path(&service.name));
+        follower.seek_to(0).map_err(Failure::from)?;
+        let bytes = follower.read_new().map_err(Failure::from)?;
+        if bytes.is_empty() {
+            continue;
         }
-        if matches!(request.stream, Stream::Both | Stream::Stderr) {
-            let mut follower = LogFollower::new(project.log_stderr(&service.name));
-            follower.seek_to(0).map_err(Failure::from)?;
-            chunks.push((true, follower.read_new().map_err(Failure::from)?));
+        printed_anything = true;
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut buffer = LineBuffer::new();
+        buffer.push(&bytes, |line| lines.push(line.to_vec()));
+        buffer.flush(|line| lines.push(line.to_vec()));
+        if let Some(tail) = request.tail {
+            if tail == 0 {
+                lines.clear();
+            } else if lines.len() > tail {
+                lines.drain(..lines.len() - tail);
+            }
         }
-
-        for (is_stderr, bytes) in chunks {
-            if bytes.is_empty() {
-                continue;
-            }
-            printed_anything = true;
-            let mut lines: Vec<Vec<u8>> = Vec::new();
-            let mut buffer = LineBuffer::new();
-            buffer.push(&bytes, |line| lines.push(line.to_vec()));
-            buffer.flush(|line| lines.push(line.to_vec()));
-            if let Some(tail) = request.tail {
-                if tail == 0 {
-                    lines.clear();
-                } else if lines.len() > tail {
-                    lines.drain(..lines.len() - tail);
-                }
-            }
-            let prefix_text = prefix.label.clone();
-            for line in lines {
-                emit(is_stderr, &prefix_text, &line);
-            }
+        for line in lines {
+            emit(false, &prefix.label, &line);
         }
     }
 
@@ -159,22 +143,10 @@ fn follow(
     let mut relays: Vec<(String, LogRelay)> = Vec::new();
     for service in services {
         let prefix = Prefix::service(&service.name, width);
-        let stdout_offset = follow_start_offset(&project.log_stdout(&service.name), request.tail)
+        let offset = follow_start_offset(&project.log_path(&service.name), request.tail)
             .map_err(Failure::from)?;
-        let stderr_offset = follow_start_offset(&project.log_stderr(&service.name), request.tail)
-            .map_err(Failure::from)?;
-        let mut relay = LogRelay::new(
-            project.log_stdout(&service.name),
-            project.log_stderr(&service.name),
-            prefix.label.clone(),
-        );
-        relay.enable(
-            !matches!(request.stream, Stream::Stderr),
-            !matches!(request.stream, Stream::Stdout),
-        );
-        relay
-            .seek(stdout_offset, stderr_offset)
-            .map_err(Failure::from)?;
+        let mut relay = LogRelay::new(project.log_path(&service.name), prefix.label.clone());
+        relay.seek(offset).map_err(Failure::from)?;
         relays.push((service.name.clone(), relay));
     }
 
@@ -195,7 +167,7 @@ fn follow(
         });
         if all_gone {
             for (_, relay) in relays.iter_mut() {
-                let _ = relay.pump();
+                relay.pump().map_err(Failure::from)?;
                 relay.flush();
             }
             break;

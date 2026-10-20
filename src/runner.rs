@@ -1,7 +1,7 @@
 //! `agproc __runner` — the detached per-service supervisor.
 //!
 //! One runner owns exactly one service for one session. It performs
-//! build-cmd -> run-cmd -> probe, streams both pty streams into the
+//! build-cmd -> run-cmd -> probe, streams the child's shared pty into the
 //! service log files, and is the single authority on the service's lifecycle:
 //! the child exit status is recorded even if a probe result arrived a moment
 //! earlier, so a probe can never report a service that is already dead.
@@ -60,7 +60,9 @@ fn install_signal_handlers() -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
     Exited(i32),
-    Ready { attempts: u32 },
+    Ready {
+        attempts: u32,
+    },
     ProbeFailed {
         attempts: u32,
         failures: u32,
@@ -106,8 +108,7 @@ impl Session {
     /// Remove the transient console stream of a session that has been fully
     /// forwarded (see the caller: only the "reached readiness" path does this).
     fn drop_console_stream(&self) {
-        let _ = std::fs::remove_file(self.project.console_stdout(&self.service.name));
-        let _ = std::fs::remove_file(self.project.console_stderr(&self.service.name));
+        let _ = std::fs::remove_file(self.project.console_log(&self.service.name));
     }
 }
 
@@ -228,7 +229,10 @@ fn inner(args: Args) -> Result<i32> {
             }
             Outcome::Exited(code) => {
                 session.state.build_exit_code = Some(code);
-                return session.finish(Phase::BuildFailed, &format!("BUILD FAILED (exit code {code})"));
+                return session.finish(
+                    Phase::BuildFailed,
+                    &format!("BUILD FAILED (exit code {code})"),
+                );
             }
             Outcome::TimedOut => {
                 let seconds = session.service.build_timeout();
@@ -291,12 +295,7 @@ fn inner(args: Args) -> Result<i32> {
 
     match outcome {
         Outcome::Ready { attempts } => {
-            match port::verify(
-                &target,
-                &session.settings,
-                running.pgid,
-                preflight.as_ref(),
-            ) {
+            match port::verify(&target, &session.settings, running.pgid, preflight.as_ref()) {
                 Ownership::ConfirmedForeign(listener) => {
                     let port = target.local_port().unwrap_or(0);
                     let reason = format!(
@@ -307,10 +306,7 @@ fn inner(args: Args) -> Result<i32> {
                     session.state.probe.last_error = Some(reason.clone());
                     session.state.probe.attempts = attempts;
                     running.terminate(stop_timeout)?;
-                    return session.finish(
-                        Phase::ProbeFailed,
-                        &format!("PROBE FAILED: {reason}"),
-                    );
+                    return session.finish(Phase::ProbeFailed, &format!("PROBE FAILED: {reason}"));
                 }
                 Ownership::Unexpected(listener) => {
                     let port = target.local_port().unwrap_or(0);
@@ -358,7 +354,10 @@ fn inner(args: Args) -> Result<i32> {
             if session.stop_requested() {
                 return session.finish(Phase::Stopped, "STOPPED");
             }
-            return session.finish(Phase::RunFailed, &format!("RUNNING FAILED (exit code {code})"));
+            return session.finish(
+                Phase::RunFailed,
+                &format!("RUNNING FAILED (exit code {code})"),
+            );
         }
         Outcome::Terminated => {
             running.terminate(stop_timeout)?;
@@ -423,29 +422,25 @@ fn inner(args: Args) -> Result<i32> {
 struct Running {
     pid: u32,
     pgid: i32,
-    out_pty: Pty,
-    err_pty: Pty,
+    pty: Pty,
     watch: ChildWatch,
     exited: Option<i32>,
 }
 
 impl Running {
     fn start(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>) -> Result<Self> {
-        let out_pty = proc::open_pty()?;
-        let err_pty = proc::open_pty()?;
+        let pty = proc::open_pty()?;
         let child = proc::spawn(&SpawnSpec {
             argv,
             cwd,
             env,
-            stdout: out_pty.slave.as_raw_fd(),
-            stderr: err_pty.slave.as_raw_fd(),
+            output: pty.slave.as_raw_fd(),
         })?;
         let pid = child.id();
         Ok(Self {
             pid,
             pgid: pid as i32,
-            out_pty,
-            err_pty,
+            pty,
             watch: ChildWatch::spawn(child),
             exited: None,
         })
@@ -465,18 +460,9 @@ impl Running {
             if terminate.load(Ordering::SeqCst) {
                 return Ok(Outcome::Terminated);
             }
-            let ready = proc::poll_readable(
-                &[
-                    self.out_pty.master.as_raw_fd(),
-                    self.err_pty.master.as_raw_fd(),
-                ],
-                100,
-            )?;
+            let ready = proc::poll_readable(&[self.pty.master.as_raw_fd()], 100)?;
             if ready[0] {
-                self.pump(sink, true)?;
-            }
-            if ready[1] {
-                self.pump(sink, false)?;
+                self.pump(sink)?;
             }
 
             if let Some(status) = self.watch.try_exit() {
@@ -511,49 +497,26 @@ impl Running {
         }
     }
 
-    fn pump(&mut self, sink: &mut LogSink, is_stdout: bool) -> Result<()> {
-        let master = if is_stdout {
-            &self.out_pty.master
-        } else {
-            &self.err_pty.master
-        };
+    fn pump(&mut self, sink: &mut LogSink) -> Result<()> {
         loop {
-            match proc::read_available(master) {
-                ReadOutcome::Data(bytes) => {
-                    if is_stdout {
-                        sink.write_stdout(&bytes)?;
-                    } else {
-                        sink.write_stderr(&bytes)?;
-                    }
-                }
+            match proc::read_available(&self.pty.master) {
+                ReadOutcome::Data(bytes) => sink.write(&bytes)?,
                 ReadOutcome::WouldBlock | ReadOutcome::Eof => return Ok(()),
             }
         }
     }
 
-    /// Keep reading until both ptys have been quiet for `quiet`.
+    /// Keep reading until the pty has been quiet for `quiet`.
     fn drain(&mut self, sink: &mut LogSink, quiet: Duration) {
         let mut last = Instant::now();
         while last.elapsed() < quiet {
-            for is_stdout in [true, false] {
-                let master = if is_stdout {
-                    &self.out_pty.master
-                } else {
-                    &self.err_pty.master
-                };
-                match proc::read_available(master) {
-                    ReadOutcome::Data(bytes) => {
-                        let written = if is_stdout {
-                            sink.write_stdout(&bytes)
-                        } else {
-                            sink.write_stderr(&bytes)
-                        };
-                        if written.is_ok() {
-                            last = Instant::now();
-                        }
+            match proc::read_available(&self.pty.master) {
+                ReadOutcome::Data(bytes) => {
+                    if sink.write(&bytes).is_ok() {
+                        last = Instant::now();
                     }
-                    ReadOutcome::WouldBlock | ReadOutcome::Eof => {}
                 }
+                ReadOutcome::WouldBlock | ReadOutcome::Eof => {}
             }
             std::thread::sleep(Duration::from_millis(20));
         }
