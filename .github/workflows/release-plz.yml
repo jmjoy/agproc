@@ -1,0 +1,64 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Publish release
+    needs: ci
+    if: github.repository == 'jmjoy/agproc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write
+    # A branch-wide concurrency group could discard a pending release PR merge.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish crate, tag, and GitHub Release
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-pr:
+    name: Update release PR
+    needs: release
+    if: github.repository == 'jmjoy/agproc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Update versions and changelog
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

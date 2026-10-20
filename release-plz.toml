@@ -1,0 +1,7 @@
+[workspace]
+# Publish only after merging a release PR, rather than any version change.
+release_always = false
+# agproc is a binary crate; cargo-semver-checks only checks library APIs.
+semver_check = false
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
