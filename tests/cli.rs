@@ -20,7 +20,12 @@ struct Project {
 
 impl Project {
     fn new(config: &str) -> Self {
-        let dir = tempfile::tempdir().expect("temp dir");
+        // macOS temp paths can contain /var -> /private/var symlinks. Match the
+        // canonical working directory used by the child when asserting paths.
+        let temp_root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp dir");
+        let dir = tempfile::tempdir_in(temp_root).expect("temp dir");
         std::fs::write(dir.path().join("agproc.toml"), config).expect("write config");
         Self {
             dir,
@@ -113,6 +118,15 @@ fn free_port() -> u16 {
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
     port
+}
+
+/// Check that a process has disappeared without relying on Linux procfs.
+fn process_exists(pid: u64) -> bool {
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(pid).expect("valid process id"));
+    !matches!(
+        nix::sys::signal::kill(pid, None),
+        Err(nix::errno::Errno::ESRCH)
+    )
 }
 
 fn python3_available() -> bool {
@@ -408,7 +422,7 @@ probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-
     // The half-ready child must not be left behind.
     let child = project.state("hopeless")["child-pid"].as_u64();
     wait_for("the failed child to disappear", || {
-        child.map(|pid| !Path::new(&format!("/proc/{pid}")).exists()) == Some(true)
+        child.map(|pid| !process_exists(pid)) == Some(true)
     });
 }
 
@@ -534,9 +548,7 @@ run-cmd = ["sleep", "60"]
 
     let build_pid = project.state("slowbuild")["child-pid"].as_u64();
     if let Some(pid) = build_pid {
-        wait_for("the cancelled build to exit", || {
-            !Path::new(&format!("/proc/{pid}")).exists()
-        });
+        wait_for("the cancelled build to exit", || !process_exists(pid));
     }
 }
 
@@ -620,7 +632,7 @@ run-cmd = ["sh", "slow-stop.sh", "b"]
     project.write(
         "slow-stop.sh",
         "name=\"$1\"\n\
-         trap 'date +%s.%N > drain-'\"$name\"'.stamp; sleep 2; exit 0' TERM\n\
+         trap 'python3 -c \"import time; print(time.monotonic())\" > drain-'\"$name\"'.stamp; sleep 2; exit 0' TERM\n\
          while true; do sleep 0.2; done\n",
     );
 
@@ -1057,10 +1069,26 @@ fn a_listener_owned_by_the_service_counts_as_ready() {
 [[service]]
 name = "server"
 build-cmd = ["echo", "preparing"]
-run-cmd = ["python3", "-m", "http.server", "{port}", "--bind", "127.0.0.1"]
-probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 3 }}
+run-cmd = ["python3", "listener.py", "{port}"]
+probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 10 }}
 "#
     ));
+    // Not `python3 -m http.server`: it looks up the host name between bind()
+    // and listen(), which can stall for many seconds on macOS CI runners, and
+    // macOS lets connection attempts to a bound socket that is not listening
+    // yet time out instead of refusing them. This listener is ready as soon
+    // as the interpreter has started.
+    project.write(
+        "listener.py",
+        r#"import socket
+import sys
+import time
+
+server = socket.create_server(("127.0.0.1", int(sys.argv[1])))
+print("listening", flush=True)
+time.sleep(120)
+"#,
+    );
     let (code, text) = project.combined(&["start"]);
     assert_eq!(
         code, 0,

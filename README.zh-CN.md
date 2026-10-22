@@ -4,7 +4,7 @@
 
 > 面向 AI 智能体与人类的**开发时进程管理器**
 >
-> *（目前仅支持 Linux）*
+> *支持 Linux 和 macOS*
 
 把项目的常驻服务（后端 / 前端 / worker）写进 `agproc.toml`，agproc 负责
 **build → run → 探针**，并把进程状态与日志落在 `.agproc/`，
@@ -31,7 +31,7 @@ agproc stop               # 全部停掉
 ## 安装
 
 ```bash
-cargo install agproc          # 从 crates.io 安装（需要 Rust 1.89+）
+cargo install agproc          # 从 crates.io 安装（需要 Rust 1.95+）
 
 # 或从源码安装
 cargo install --path .
@@ -236,10 +236,27 @@ AI 智能体可以直接读取 `.agproc/logs/<service>.log` 获取完整运行�
   CLI 被超时杀掉也不影响正在进行的 build 与探针。
 - **runner 是子进程生命周期的唯一权威**：独立的 `waitpid` 与探针循环并发，子进程一退出就立即落 `run-failed`，
   优先级高于任何探针结果——探针永远不会把已死的服务报成就绪。
-- **端口占用三机制**：起 `run-cmd` 前扫描 `/proc/net/tcp{,6}` 记录占用者并告警；探针通过瞬间校验端口归属
+- **跨平台进程管理**：`sysinfo` 负责进程存活查询，`listeners` 查找本地 TCP 监听者，`nix` 负责进程组、
+  信号和 PTY，在 Linux 与 macOS 上使用相同的管理流程；不依赖外部 `ps`、`ss` 或 `lsof` 命令。
+- **端口占用三机制**：起 `run-cmd` 前记录 TCP 监听端口的占用者并告警；探针通过瞬间校验端口归属
   （仍属于最初那个外来进程则判失败；属于容器运行时等则只告警）；子进程退出事件优先。
-- **PID 复用安全**：状态文件记录 runner 的 `/proc/<pid>/stat` starttime，`ps` 据此判断存活。
+  查询受当前用户的系统权限限制，系统不允许检查的端口归属会视为未知。
+- **PID 复用安全**：状态文件记录 runner 的原生高精度启动时间（Linux 使用 `/proc/<pid>/stat` 的时钟 tick，
+  macOS 使用 `proc_pidinfo` 的微秒时间），`ps` 结合 PID 校验。现有 Linux 状态文件仍可读取。
 - **编排锁 + generation**：同一 service 同时只会有一个 start/restart；`stop` 不参与加锁，随时可打断。
+
+## 开发与测试
+
+测试需要 Python 3，用于测试服务和 PTY 检查；agproc 本身不依赖 Python。
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+```
+
+GitHub Actions 在 Linux 与 macOS上，分别使用 stable Rust 和最低支持的
+Rust 1.95 运行完整测试；格式检查和 Clippy 在 Linux 与 macOS 上执行。
 
 ## License
 

@@ -283,10 +283,11 @@ fn start_one(
     loop {
         relay.pump().map_err(Failed::from)?;
 
-        if let Some(state) = state::load(&state_path).state
-            && state.generation == generation
-            && state.effective_phase().settled()
-        {
+        if let Some(state) = settled_state(|| {
+            state::load(&state_path)
+                .state
+                .filter(|state| state.generation == generation)
+        }) {
             drain_logs(&mut relay)?;
             return settle(&state);
         }
@@ -327,6 +328,23 @@ fn start_one(
     }
 }
 
+/// The record of this session once its phase is settled.
+///
+/// A runner publishes its outcome before it exits, but `effective_phase` only
+/// checks the runner after the record has been read. A runner that finishes in
+/// between leaves an outdated in-flight record next to a dead process, which
+/// is indistinguishable from a runner that vanished (`Stale`). So `Stale` is
+/// confirmed with a second read, taken after the runner is known to be gone.
+fn settled_state(mut load: impl FnMut() -> Option<State>) -> Option<State> {
+    let mut state = load()?;
+    let mut phase = state.effective_phase();
+    if phase == Phase::Stale {
+        state = load()?;
+        phase = state.effective_phase();
+    }
+    phase.settled().then_some(state)
+}
+
 fn drain_logs(relay: &mut LogRelay) -> Result<(), Failed> {
     // Let the last writes land so the outcome marker is never printed before
     // the output that explains it.
@@ -365,5 +383,61 @@ fn settle(state: &State) -> Result<Started, Failed> {
             exit::GENERIC,
             format!("unexpected phase \"{}\"", other.as_str()),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record whose runner is certainly gone.
+    fn orphaned(phase: Phase) -> State {
+        let mut state = State::new("svc", 1, "h");
+        state.runner_pid = 0x7fff_fffe;
+        state.phase = phase;
+        state
+    }
+
+    #[test]
+    fn a_runner_that_finished_after_the_record_was_read_is_not_stale() {
+        // The first read predates the outcome; the runner exited right after.
+        let mut reads = vec![orphaned(Phase::Building), orphaned(Phase::BuildFailed)].into_iter();
+        let state = settled_state(|| reads.next()).expect("a settled record");
+        assert_eq!(state.effective_phase(), Phase::BuildFailed);
+    }
+
+    #[test]
+    fn a_runner_that_vanished_without_an_outcome_stays_stale() {
+        for phase in [Phase::Building, Phase::Starting, Phase::Running] {
+            let state = settled_state(|| Some(orphaned(phase))).expect("a settled record");
+            assert_eq!(state.effective_phase(), Phase::Stale);
+        }
+    }
+
+    #[test]
+    fn a_recorded_outcome_is_settled_with_a_single_read() {
+        let mut reads = 0;
+        let state = settled_state(|| {
+            reads += 1;
+            Some(orphaned(Phase::ProbeFailed))
+        })
+        .expect("a settled record");
+        assert_eq!(state.effective_phase(), Phase::ProbeFailed);
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn a_live_runner_that_is_still_working_is_not_settled() {
+        let mut state = State::new("svc", 1, "h");
+        state.phase = Phase::Building;
+        // We are the runner we just recorded, so it is live.
+        assert!(settled_state(|| Some(state.clone())).is_none());
+    }
+
+    #[test]
+    fn a_missing_record_is_not_settled() {
+        assert!(settled_state(|| None).is_none());
+        let mut reads = vec![Some(orphaned(Phase::Building)), None].into_iter();
+        assert!(settled_state(|| reads.next().flatten()).is_none());
     }
 }

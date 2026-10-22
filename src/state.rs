@@ -125,6 +125,7 @@ pub struct State {
     pub generation: u64,
     pub phase: Phase,
     pub runner_pid: u32,
+    /// Opaque native start time; the serialized key is retained for compatibility.
     pub runner_start_ticks: u64,
     pub child_pid: Option<u32>,
     pub child_pgid: Option<i32>,
@@ -178,11 +179,10 @@ impl State {
         if !procinfo::pid_alive(self.runner_pid) {
             return false;
         }
-        match procinfo::pid_start_ticks(self.runner_pid) {
-            Some(ticks) if self.runner_start_ticks != 0 => ticks == self.runner_start_ticks,
-            // Without a recorded start time, fall back to liveness only.
-            _ => true,
-        }
+        // Old records without a start time fall back to liveness. When one was
+        // recorded, a failed lookup must not silently disable PID-reuse checks.
+        self.runner_start_ticks == 0
+            || procinfo::pid_start_ticks(self.runner_pid) == Some(self.runner_start_ticks)
     }
 
     /// Recorded phase, downgraded to `Stale` when the runner vanished before
@@ -303,6 +303,7 @@ mod tests {
         assert_eq!(read.phase, Phase::Running);
         assert_eq!(read.generation, 3);
         // We are the runner we just recorded, so the record is live.
+        assert_ne!(read.runner_start_ticks, 0);
         assert!(read.runner_live());
         assert_eq!(read.effective_phase(), Phase::Running);
         assert_eq!(read.probe.attempts, 2);

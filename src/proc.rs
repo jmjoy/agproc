@@ -171,17 +171,37 @@ pub fn signal_group(pgid: i32, signal: Signal) -> Result<()> {
     match killpg(Pid::from_raw(pgid), signal) {
         Ok(()) => Ok(()),
         Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(nix::errno::Errno::EPERM) if only_zombies_left(pgid) => Ok(()),
         Err(err) => Err(anyhow::Error::from(err))
             .with_context(|| format!("cannot send {signal:?} to process group {pgid}")),
     }
 }
 
+/// Is there still a process in the group that has not exited? On macOS,
+/// members that exited but are waiting to be reaped do not count.
 pub fn group_exists(pgid: i32) -> bool {
     match killpg(Pid::from_raw(pgid), None) {
         Ok(()) => true,
         Err(nix::errno::Errno::ESRCH) => false,
+        Err(nix::errno::Errno::EPERM) => !only_zombies_left(pgid),
         Err(_) => true,
     }
+}
+
+/// Is `killpg`'s EPERM merely a group of zombies? Linux signals zombies
+/// successfully, but macOS skips them and answers EPERM when nothing else is
+/// left in the group, until the parent (or launchd) has reaped them. That
+/// window is right after a service is terminated, when its group must be
+/// treated as gone rather than as an error.
+#[cfg(target_os = "macos")]
+fn only_zombies_left(pgid: i32) -> bool {
+    !crate::procinfo::group_has_running_member(pgid)
+}
+
+/// On Linux, EPERM always means a member the caller may not signal.
+#[cfg(not(target_os = "macos"))]
+fn only_zombies_left(_pgid: i32) -> bool {
+    false
 }
 
 /// Exit code of a finished child: signal deaths are reported as `128 + signal`.
@@ -321,6 +341,37 @@ time.sleep(5)
 
         // Both fds are the same tty, output arrives before exit, and LF is kept.
         assert_eq!(out, b"OUT-1\nERR-1\nOUT-2\n", "combined bytes: {out:?}");
+    }
+
+    #[test]
+    fn a_missing_group_does_not_exist_and_needs_no_signal() {
+        let pgid = 0x7fff_fffe; // certainly no such group
+        assert!(!group_exists(pgid));
+        signal_group(pgid, Signal::SIGTERM).unwrap();
+    }
+
+    /// macOS answers EPERM, not success, when `killpg` finds only zombies.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_group_of_unreaped_zombies_is_gone_and_can_be_signalled() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && crate::procinfo::pid_alive(child.id()) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // The child has exited but is not reaped yet: only a zombie is left.
+        let exists = group_exists(pgid);
+        let signalled = signal_group(pgid, Signal::SIGTERM);
+        child.wait().unwrap();
+        assert!(!exists, "a group of zombies was reported as existing");
+        signalled.unwrap();
+        assert!(!group_exists(pgid));
     }
 
     #[test]

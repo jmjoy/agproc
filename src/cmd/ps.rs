@@ -1,7 +1,7 @@
 //! `agproc ps` — what is actually running.
 //!
 //! Every row is derived from the state file plus a liveness check on the runner
-//! (pid + `/proc/<pid>/stat` start time), so the answer stays correct long
+//! (pid + native high-resolution start time), so the answer stays correct long
 //! after the CLI that started the service exited.
 
 use anyhow::Result;
