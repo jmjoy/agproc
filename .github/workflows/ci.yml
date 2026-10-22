@@ -17,8 +17,8 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  quality:
-    name: Format and Clippy (${{ matrix.os }})
+  check:
+    name: Check (${{ matrix.os }}, Rust 1.95.0)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -38,23 +38,6 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-  test:
-    name: Test (${{ matrix.os }}, Rust 1.95.0)
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
-      - uses: Swatinem/rust-cache@v2
       - name: Check test prerequisites
         run: command -v python3
       - name: Run tests
