@@ -4,7 +4,7 @@
 
 > A **dev-time process manager** for both AI agents and humans
 >
-> *(Linux only, for now)*
+> *Linux and macOS*
 
 Declare your project's long-running services (backend / frontend / workers) in `agproc.toml`;
 agproc takes care of **build → run → probe** and keeps every process's state and logs
@@ -31,7 +31,7 @@ agproc stop               # stop everything
 ## Install
 
 ```bash
-cargo install agproc          # from crates.io (needs Rust 1.89+)
+cargo install agproc          # from crates.io (needs Rust 1.95+)
 
 # or from a checkout
 cargo install --path .
@@ -252,13 +252,32 @@ state remains readable so `ps`, `stop`, and `restart` can manage older runners.
 - **The runner is the single authority on the child's lifecycle**: an independent `waitpid` runs
   alongside the probe loop and records `run-failed` the moment the child exits, outranking any probe
   result — a probe can never report a dead service as ready.
-- **Port ownership in three layers**: before `run-cmd` starts, `/proc/net/tcp{,6}` is scanned to
-  record (and warn about) an existing listener; the instant a probe succeeds, ownership is verified
-  (still the same foreign process → fail; a container runtime publishing on our behalf → warn only);
-  and a child exit always takes precedence.
-- **PID-reuse safe**: state records the runner's `/proc/<pid>/stat` start time, which `ps` checks.
+- **Cross-platform process handling**: `sysinfo` provides process liveness, `listeners` finds
+  local TCP listeners, and `nix` handles process groups, signals, and PTYs on Linux and macOS.
+  No external `ps`, `ss`, or `lsof` command is needed.
+- **Port ownership in three layers**: before `run-cmd` starts, an existing TCP listener is recorded
+  (and warned about); the instant a probe succeeds, ownership is verified (still the same foreign
+  process → fail; a container runtime publishing on our behalf → warn only); and a child exit
+  always takes precedence. Discovery uses the current user's OS permissions; an owner the OS
+  does not let agproc inspect is treated as unknown.
+- **PID-reuse safe**: state records the runner's native high-resolution start time (clock ticks
+  from `/proc/<pid>/stat` on Linux, microseconds from `proc_pidinfo` on macOS), which `ps` checks
+  alongside the PID. Existing Linux state files remain readable.
 - **Orchestration lock + generation**: only one start/restart per service at a time, while `stop`
   never takes the lock so it can always interrupt.
+
+## Development and tests
+
+The test suite requires Python 3 for test services and PTY checks; agproc itself does not require it.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+```
+
+GitHub Actions runs the full test suite on Linux and macOS, using both
+stable Rust and the minimum supported Rust 1.95. Formatting and Clippy run on Linux and macOS.
 
 ## License
 

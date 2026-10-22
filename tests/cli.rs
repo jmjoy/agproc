@@ -20,7 +20,12 @@ struct Project {
 
 impl Project {
     fn new(config: &str) -> Self {
-        let dir = tempfile::tempdir().expect("temp dir");
+        // macOS temp paths can contain /var -> /private/var symlinks. Match the
+        // canonical working directory used by the child when asserting paths.
+        let temp_root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp dir");
+        let dir = tempfile::tempdir_in(temp_root).expect("temp dir");
         std::fs::write(dir.path().join("agproc.toml"), config).expect("write config");
         Self {
             dir,
@@ -113,6 +118,15 @@ fn free_port() -> u16 {
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
     port
+}
+
+/// Check that a process has disappeared without relying on Linux procfs.
+fn process_exists(pid: u64) -> bool {
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(pid).expect("valid process id"));
+    !matches!(
+        nix::sys::signal::kill(pid, None),
+        Err(nix::errno::Errno::ESRCH)
+    )
 }
 
 fn python3_available() -> bool {
@@ -408,7 +422,7 @@ probe = {{ tcp-connect = {{ port = {port} }}, initial-delay-seconds = 1, period-
     // The half-ready child must not be left behind.
     let child = project.state("hopeless")["child-pid"].as_u64();
     wait_for("the failed child to disappear", || {
-        child.map(|pid| !Path::new(&format!("/proc/{pid}")).exists()) == Some(true)
+        child.map(|pid| !process_exists(pid)) == Some(true)
     });
 }
 
@@ -534,9 +548,7 @@ run-cmd = ["sleep", "60"]
 
     let build_pid = project.state("slowbuild")["child-pid"].as_u64();
     if let Some(pid) = build_pid {
-        wait_for("the cancelled build to exit", || {
-            !Path::new(&format!("/proc/{pid}")).exists()
-        });
+        wait_for("the cancelled build to exit", || !process_exists(pid));
     }
 }
 
@@ -620,7 +632,7 @@ run-cmd = ["sh", "slow-stop.sh", "b"]
     project.write(
         "slow-stop.sh",
         "name=\"$1\"\n\
-         trap 'date +%s.%N > drain-'\"$name\"'.stamp; sleep 2; exit 0' TERM\n\
+         trap 'python3 -c \"import time; print(time.monotonic())\" > drain-'\"$name\"'.stamp; sleep 2; exit 0' TERM\n\
          while true; do sleep 0.2; done\n",
     );
 
