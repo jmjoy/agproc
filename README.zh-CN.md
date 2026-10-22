@@ -255,8 +255,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-GitHub Actions 在 Linux 与 macOS上，分别使用 stable Rust 和最低支持的
-Rust 1.95 运行完整测试；格式检查和 Clippy 在 Linux 与 macOS 上执行。
+GitHub Actions 在 `ubuntu-latest` 和 `macos-latest` 上，使用 Rust 1.95.0
+执行格式检查、Clippy 和完整测试。
 
 ## License
 

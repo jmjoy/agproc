@@ -24,13 +24,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.95.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
@@ -39,21 +40,20 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }}, Rust ${{ matrix.toolchain }})
+    name: Test (${{ matrix.os }}, Rust 1.95.0)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
-        toolchain: [stable, "1.95.0"]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
       - name: Check test prerequisites
         run: command -v python3
