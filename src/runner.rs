@@ -222,6 +222,10 @@ fn inner(args: Args) -> Result<i32> {
 
         session.state.build_finished_at = Some(now_unix_ms());
         match outcome {
+            Outcome::Exited(code) if session.stop_requested() => {
+                session.state.build_exit_code = Some(code);
+                return session.finish(Phase::Stopped, "STOPPED (build cancelled)");
+            }
             Outcome::Exited(0) => {
                 session.state.build_exit_code = Some(0);
                 session.marker("BUILD SUCCEED")?;
