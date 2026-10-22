@@ -16,7 +16,7 @@ jobs:
     name: Publish release
     needs: ci
     if: github.repository == 'jmjoy/agproc'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: write
@@ -41,7 +41,7 @@ jobs:
     name: Update release PR
     needs: release
     if: github.repository == 'jmjoy/agproc'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write

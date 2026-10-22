@@ -276,8 +276,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-GitHub Actions runs the full test suite on Linux and macOS, using both
-stable Rust and the minimum supported Rust 1.95. Formatting and Clippy run on Linux and macOS.
+GitHub Actions runs formatting, Clippy, and the full test suite with Rust 1.95.0 on
+`ubuntu-latest` and `macos-latest`.
 
 ## License
 
