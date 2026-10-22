@@ -1,8 +1,9 @@
 //! Process identity and TCP listener ownership on Linux and macOS.
 //!
 //! `sysinfo` and `listeners` handle platform-specific process/socket discovery;
-//! `nix` provides process groups. Only the high-resolution start time needs a
-//! small native implementation because `sysinfo` exposes whole seconds.
+//! `nix` provides process groups. Only the high-resolution start time (`sysinfo`
+//! exposes whole seconds) and, on macOS, the members of a process group need a
+//! small native implementation.
 
 use nix::unistd::{Pid, getpgid};
 use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
@@ -77,6 +78,42 @@ pub fn pid_start_ticks(pid: u32) -> Option<u64> {
 pub fn pid_pgrp(pid: u32) -> Option<i32> {
     let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
     getpgid(Some(Pid::from_raw(pid))).ok().map(Pid::as_raw)
+}
+
+/// Does the process group still have a member that is running, that is, one
+/// that is not a zombie waiting to be reaped?
+///
+/// macOS needs this because `killpg` answers EPERM, not success, for a group
+/// whose members are all zombies, which looks like a group the caller may not
+/// signal. When the members cannot be listed the group counts as running.
+#[cfg(target_os = "macos")]
+pub fn group_has_running_member(pgid: i32) -> bool {
+    use nix::libc;
+    use std::mem::size_of;
+
+    // Both calls count pids, not bytes. A null buffer asks for the number of
+    // pids to make room for, which includes some slack for new processes.
+    // SAFETY: with a null buffer nothing is written.
+    let capacity = unsafe { libc::proc_listpgrppids(pgid, std::ptr::null_mut(), 0) };
+    let Some(capacity) = usize::try_from(capacity).ok().filter(|count| *count > 0) else {
+        return true;
+    };
+    let Ok(size) = libc::c_int::try_from(capacity * size_of::<libc::pid_t>()) else {
+        return true;
+    };
+    let mut pids: Vec<libc::pid_t> = vec![0; capacity];
+    // SAFETY: `pids` is valid for writes of `size` bytes.
+    let listed = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), size) };
+    // A completely filled buffer may have been cut short.
+    let Some(listed) = usize::try_from(listed)
+        .ok()
+        .filter(|count| *count < capacity)
+    else {
+        return true;
+    };
+    pids[..listed]
+        .iter()
+        .any(|pid| u32::try_from(*pid).is_ok_and(pid_alive))
 }
 
 /// `(pid, comm)` pairs currently listening on a local TCP port.

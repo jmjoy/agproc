@@ -1069,10 +1069,26 @@ fn a_listener_owned_by_the_service_counts_as_ready() {
 [[service]]
 name = "server"
 build-cmd = ["echo", "preparing"]
-run-cmd = ["python3", "-m", "http.server", "{port}", "--bind", "127.0.0.1"]
-probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 3 }}
+run-cmd = ["python3", "listener.py", "{port}"]
+probe = {{ tcp-connect = {{ host = "127.0.0.1", port = {port} }}, initial-delay-seconds = 1, period-seconds = 1, timeout-seconds = 2, failure-threshold = 10 }}
 "#
     ));
+    // Not `python3 -m http.server`: it looks up the host name between bind()
+    // and listen(), which can stall for many seconds on macOS CI runners, and
+    // macOS lets connection attempts to a bound socket that is not listening
+    // yet time out instead of refusing them. This listener is ready as soon
+    // as the interpreter has started.
+    project.write(
+        "listener.py",
+        r#"import socket
+import sys
+import time
+
+server = socket.create_server(("127.0.0.1", int(sys.argv[1])))
+print("listening", flush=True)
+time.sleep(120)
+"#,
+    );
     let (code, text) = project.combined(&["start"]);
     assert_eq!(
         code, 0,
