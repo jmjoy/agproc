@@ -544,7 +544,15 @@ run-cmd = ["sleep", "60"]
 
     // The waiting start reports that it was superseded, not that it succeeded.
     let waiting = handle.join().expect("start thread");
-    assert_eq!(waiting.status.code(), Some(8));
+    assert_eq!(
+        waiting.status.code(),
+        Some(8),
+        "waiting start output:\n{}\n{}\nconsole:\n{}",
+        String::from_utf8_lossy(&waiting.stdout),
+        String::from_utf8_lossy(&waiting.stderr),
+        std::fs::read_to_string(project.file(".agproc/tmp/slowbuild.console.log"))
+            .unwrap_or_default(),
+    );
 
     let build_pid = project.state("slowbuild")["child-pid"].as_u64();
     if let Some(pid) = build_pid {

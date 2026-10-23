@@ -82,15 +82,14 @@ pub fn pid_pgrp(pid: u32) -> Option<i32> {
     getpgid(Some(Pid::from_raw(pid))).ok().map(Pid::as_raw)
 }
 
-/// Does the process group still have a member that is running, that is, one
-/// that is not a zombie waiting to be reaped?
+/// Does the process group still have a member that has not committed to exit?
 ///
 /// macOS needs this because `killpg` answers EPERM, not success, for a group
-/// whose members are all zombies, which looks like a group the caller may not
-/// signal. Failed enumeration or an unknown member status counts as running.
+/// whose members have exited or are exiting, which looks like a group the
+/// caller may not signal. Failed queries and unknown statuses count as running.
 #[cfg(target_os = "macos")]
 pub fn group_has_running_member(pgid: i32) -> bool {
-    use nix::{errno::Errno, libc};
+    use nix::libc;
 
     group_has_running_member_with(
         |pids| {
@@ -105,16 +104,48 @@ pub fn group_has_running_member(pgid: i32) -> bool {
                 libc::proc_listpgrppids(pgid, buffer, std::mem::size_of_val(pids) as libc::c_int)
             }
         },
-        |pid| match pid_status(pid) {
-            Some(status) => Some(status != ProcessStatus::Zombie),
-            // A process may be reaped between enumeration and inspection. Only
-            // ESRCH confirms it is gone; permission/inspection failures do not.
-            None => match nix::sys::signal::kill(Pid::from_raw(pid as i32), None) {
-                Err(Errno::ESRCH) => Some(false),
-                _ => None,
-            },
-        },
+        group_member_is_running,
     )
+}
+
+/// Query a group member including zombie and in-exit records. `sysinfo` may
+/// omit these while `kill(pid, 0)` still succeeds, so neither can confirm exit.
+#[cfg(target_os = "macos")]
+fn group_member_is_running(pid: u32) -> Option<bool> {
+    use nix::{errno::Errno, libc};
+    use std::mem::{MaybeUninit, size_of};
+
+    // Defined in macOS <sys/proc_info.h>, but not exposed by libc. The kernel
+    // sets this when exit is committed, before p_stat transitions to SZOMB.
+    const PROC_FLAG_INEXIT: u32 = 4;
+
+    let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+    let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    let size = size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    Errno::clear();
+    // SAFETY: the buffer is aligned and sized for PROC_PIDT_SHORTBSDINFO and
+    // only read after a complete write. A nonzero arg explicitly includes
+    // zombies; the default arg of zero would return ESRCH for them.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            1,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written == size {
+        // SAFETY: proc_pidinfo initialized the full struct above.
+        let info = unsafe { info.assume_init() };
+        Some(info.pbsi_status != libc::SZOMB && info.pbsi_flags & PROC_FLAG_INEXIT == 0)
+    } else if written <= 0 && Errno::last() == Errno::ESRCH {
+        // The member was reaped between listing the group and inspecting it.
+        Some(false)
+    } else {
+        // Permission errors and incomplete reads cannot confirm an exit.
+        None
+    }
 }
 
 // Keep the snapshot logic testable on Linux as well as macOS. The callbacks
@@ -284,6 +315,11 @@ mod tests {
         assert_ne!(start, 0);
         assert_eq!(pid_start_ticks(pid), Some(start));
         assert_eq!(pid_pgrp(pid), Some(nix::unistd::getpgrp().as_raw()));
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(group_member_is_running(pid), Some(true));
+            assert!(group_has_running_member(nix::unistd::getpgrp().as_raw()));
+        }
     }
 
     #[test]
