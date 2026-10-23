@@ -11,8 +11,12 @@ use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
 /// Alive means "exists and is not a zombie". Refresh only the requested process,
 /// without collecting its threads, memory, CPU usage, or environment.
 pub fn pid_alive(pid: u32) -> bool {
+    pid_status(pid).is_some_and(|status| status != ProcessStatus::Zombie)
+}
+
+fn pid_status(pid: u32) -> Option<ProcessStatus> {
     if pid == 0 || pid > i32::MAX as u32 {
-        return false;
+        return None;
     }
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = System::new();
@@ -21,9 +25,7 @@ pub fn pid_alive(pid: u32) -> bool {
         true,
         ProcessRefreshKind::nothing().without_tasks(),
     );
-    system
-        .process(pid)
-        .is_some_and(|process| process.status() != ProcessStatus::Zombie)
+    system.process(pid).map(|process| process.status())
 }
 
 /// An opaque, high-resolution process start time used to detect PID reuse.
@@ -85,35 +87,75 @@ pub fn pid_pgrp(pid: u32) -> Option<i32> {
 ///
 /// macOS needs this because `killpg` answers EPERM, not success, for a group
 /// whose members are all zombies, which looks like a group the caller may not
-/// signal. When the members cannot be listed the group counts as running.
+/// signal. Failed enumeration or an unknown member status counts as running.
 #[cfg(target_os = "macos")]
 pub fn group_has_running_member(pgid: i32) -> bool {
-    use nix::libc;
+    use nix::{errno::Errno, libc};
+
+    group_has_running_member_with(
+        |pids| {
+            let buffer = if pids.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                pids.as_mut_ptr().cast()
+            };
+            // SAFETY: `pids` is a valid buffer; the helper checks that its byte
+            // size fits c_int. A null buffer requests the capacity in PIDs.
+            unsafe {
+                libc::proc_listpgrppids(pgid, buffer, std::mem::size_of_val(pids) as libc::c_int)
+            }
+        },
+        |pid| match pid_status(pid) {
+            Some(status) => Some(status != ProcessStatus::Zombie),
+            // A process may be reaped between enumeration and inspection. Only
+            // ESRCH confirms it is gone; permission/inspection failures do not.
+            None => match nix::sys::signal::kill(Pid::from_raw(pid as i32), None) {
+                Err(Errno::ESRCH) => Some(false),
+                _ => None,
+            },
+        },
+    )
+}
+
+// Keep the snapshot logic testable on Linux as well as macOS. The callbacks
+// provide the native PID enumeration and a member's running/exited/unknown state.
+#[cfg(any(target_os = "macos", test))]
+fn group_has_running_member_with(
+    mut list_pids: impl FnMut(&mut [i32]) -> i32,
+    mut is_running: impl FnMut(u32) -> Option<bool>,
+) -> bool {
+    use nix::errno::Errno;
     use std::mem::size_of;
 
-    // Both calls count pids, not bytes. A null buffer asks for the number of
-    // pids to make room for, which includes some slack for new processes.
-    // SAFETY: with a null buffer nothing is written.
-    let capacity = unsafe { libc::proc_listpgrppids(pgid, std::ptr::null_mut(), 0) };
-    let Some(capacity) = usize::try_from(capacity).ok().filter(|count| *count > 0) else {
-        return true;
-    };
-    let Ok(size) = libc::c_int::try_from(capacity * size_of::<libc::pid_t>()) else {
-        return true;
-    };
-    let mut pids: Vec<libc::pid_t> = vec![0; capacity];
-    // SAFETY: `pids` is valid for writes of `size` bytes.
-    let listed = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), size) };
-    // A completely filled buffer may have been cut short.
-    let Some(listed) = usize::try_from(listed)
+    // Both calls count PIDs, not bytes; an empty slice requests the capacity.
+    Errno::clear();
+    let Some(capacity) = usize::try_from(list_pids(&mut []))
         .ok()
-        .filter(|count| *count < capacity)
+        .filter(|count| *count > 0 && *count <= i32::MAX as usize / size_of::<i32>())
     else {
         return true;
     };
-    pids[..listed]
-        .iter()
-        .any(|pid| u32::try_from(*pid).is_ok_and(pid_alive))
+    let mut pids = vec![0; capacity];
+    // libproc returns zero both for an empty group and on syscall failure.
+    // Clear the original killpg EPERM so errno distinguishes those outcomes.
+    Errno::clear();
+    let listed = list_pids(&mut pids);
+    let error = Errno::last_raw();
+    // A completely filled buffer may have been cut short. Neither a failed
+    // query nor an incomplete snapshot can establish that all members exited.
+    let Some(listed) = usize::try_from(listed)
+        .ok()
+        .filter(|count| *count < capacity && (*count != 0 || error == 0))
+    else {
+        return true;
+    };
+    pids[..listed].iter().any(|pid| {
+        u32::try_from(*pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .and_then(&mut is_running)
+            != Some(false)
+    })
 }
 
 /// `(pid, comm)` pairs currently listening on a local TCP port.
@@ -142,6 +184,97 @@ mod tests {
     use std::net::{TcpListener, TcpStream, UdpSocket};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn failed_group_enumeration_does_not_confirm_that_members_exited() {
+        use nix::errno::Errno;
+
+        for error in [Errno::EPERM, Errno::EIO] {
+            let running = group_has_running_member_with(
+                |pids| {
+                    if pids.is_empty() {
+                        4
+                    } else {
+                        error.set();
+                        0 // libproc's failure return value
+                    }
+                },
+                |_| panic!("failed enumeration must not inspect members"),
+            );
+            assert!(running, "{error} must not be mistaken for an empty group");
+        }
+    }
+
+    #[test]
+    fn an_empty_group_is_gone_even_after_an_earlier_errno() {
+        use nix::errno::Errno;
+
+        Errno::EPERM.set(); // the killpg failure that triggered the lookup
+        let running = group_has_running_member_with(
+            |pids| {
+                if pids.is_empty() {
+                    // Even a successful capacity query may leave errno set.
+                    Errno::EIO.set();
+                    4
+                } else {
+                    0 // success: no members remain and errno is untouched
+                }
+            },
+            |_| panic!("an empty group has no members to inspect"),
+        );
+        assert!(!running);
+    }
+
+    #[test]
+    fn only_confirmed_exited_members_allow_a_group_to_count_as_gone() {
+        for (states, expected) in [
+            ([Some(false), Some(false)], false),
+            ([Some(false), Some(true)], true),
+            ([Some(false), None], true),
+        ] {
+            let running = group_has_running_member_with(
+                |pids| {
+                    if pids.is_empty() {
+                        4
+                    } else {
+                        pids[..2].copy_from_slice(&[1, 2]);
+                        2
+                    }
+                },
+                |pid| states[pid as usize - 1],
+            );
+            assert_eq!(running, expected, "member states: {states:?}");
+        }
+    }
+
+    #[test]
+    fn failed_or_truncated_group_snapshots_count_as_running() {
+        for (capacity, listed) in [(0, 0), (-1, 0), (i32::MAX, 0), (4, -1), (4, 4), (4, 5)] {
+            let running = group_has_running_member_with(
+                |pids| if pids.is_empty() { capacity } else { listed },
+                |_| panic!("an incomplete snapshot must not inspect members"),
+            );
+            assert!(running, "capacity {capacity}, listed {listed}");
+        }
+    }
+
+    #[test]
+    fn invalid_group_members_cannot_confirm_that_the_group_exited() {
+        for pid in [0, -1] {
+            let running = group_has_running_member_with(
+                |pids| {
+                    if pids.is_empty() {
+                        4
+                    } else {
+                        pids[0] = pid;
+                        1
+                    }
+                },
+                |_| panic!("invalid PIDs must not be inspected"),
+            );
+            assert!(running, "invalid pid {pid}");
+        }
+    }
 
     #[test]
     fn current_process_has_a_stable_identity_and_group() {
