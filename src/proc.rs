@@ -171,36 +171,35 @@ pub fn signal_group(pgid: i32, signal: Signal) -> Result<()> {
     match killpg(Pid::from_raw(pgid), signal) {
         Ok(()) => Ok(()),
         Err(nix::errno::Errno::ESRCH) => Ok(()),
-        Err(nix::errno::Errno::EPERM) if only_zombies_left(pgid) => Ok(()),
+        Err(nix::errno::Errno::EPERM) if only_exited_members_left(pgid) => Ok(()),
         Err(err) => Err(anyhow::Error::from(err))
             .with_context(|| format!("cannot send {signal:?} to process group {pgid}")),
     }
 }
 
 /// Is there still a process in the group that has not exited? On macOS,
-/// members that exited but are waiting to be reaped do not count.
+/// members committed to exit or waiting to be reaped do not count.
 pub fn group_exists(pgid: i32) -> bool {
     match killpg(Pid::from_raw(pgid), None) {
         Ok(()) => true,
         Err(nix::errno::Errno::ESRCH) => false,
-        Err(nix::errno::Errno::EPERM) => !only_zombies_left(pgid),
+        Err(nix::errno::Errno::EPERM) => !only_exited_members_left(pgid),
         Err(_) => true,
     }
 }
 
-/// Is `killpg`'s EPERM merely a group of zombies? Linux signals zombies
-/// successfully, but macOS skips them and answers EPERM when nothing else is
-/// left in the group, until the parent (or launchd) has reaped them. That
-/// window is right after a service is terminated, when its group must be
-/// treated as gone rather than as an error.
+/// Is `killpg`'s EPERM merely a group whose members have committed to exit?
+/// macOS can skip those members even before they become zombies, returning
+/// EPERM until the parent (or launchd) has reaped them. Confirm native exit
+/// status so these cleanup races do not hide actual permission errors.
 #[cfg(target_os = "macos")]
-fn only_zombies_left(pgid: i32) -> bool {
+fn only_exited_members_left(pgid: i32) -> bool {
     !crate::procinfo::group_has_running_member(pgid)
 }
 
 /// On Linux, EPERM always means a member the caller may not signal.
 #[cfg(not(target_os = "macos"))]
-fn only_zombies_left(_pgid: i32) -> bool {
+fn only_exited_members_left(_pgid: i32) -> bool {
     false
 }
 
@@ -354,21 +353,54 @@ time.sleep(5)
     #[cfg(target_os = "macos")]
     #[test]
     fn a_group_of_unreaped_zombies_is_gone_and_can_be_signalled() {
+        use nix::libc;
+
         let mut child = Command::new("sh")
             .args(["-c", "exit 0"])
             .process_group(0)
             .spawn()
             .unwrap();
         let pgid = child.id() as i32;
+        // WNOWAIT confirms an actual zombie without reaping it or relying on
+        // sysinfo, which may omit zombie records on macOS.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && crate::procinfo::pid_alive(child.id()) {
+        let exited = loop {
+            // SAFETY: siginfo is a valid output buffer, and WNOWAIT leaves
+            // the direct child available for Child::wait below.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pgid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                )
+            };
+            assert_eq!(
+                result,
+                0,
+                "waitid failed: {}",
+                std::io::Error::last_os_error()
+            );
+            if info.si_pid == pgid && info.si_code == libc::CLD_EXITED {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
             std::thread::sleep(Duration::from_millis(20));
-        }
+        };
 
         // The child has exited but is not reaped yet: only a zombie is left.
+        let has_running_member = crate::procinfo::group_has_running_member(pgid);
         let exists = group_exists(pgid);
         let signalled = signal_group(pgid, Signal::SIGTERM);
         child.wait().unwrap();
+        assert!(exited, "the child did not exit before the deadline");
+        assert!(
+            !has_running_member,
+            "the native group query did not recognize the zombie"
+        );
         assert!(!exists, "a group of zombies was reported as existing");
         signalled.unwrap();
         assert!(!group_exists(pgid));
