@@ -58,9 +58,8 @@ pub enum Command {
 
 #[derive(Args, Debug)]
 pub struct StartArgs {
-    /// Service names (default: every service)
-    #[arg(value_name = "SERVICE")]
-    pub services: Vec<String>,
+    #[command(flatten)]
+    pub targets: TargetArgs,
 
     /// Stop waiting after this many seconds (the runner keeps working)
     #[arg(long, value_name = "SECONDS")]
@@ -69,16 +68,19 @@ pub struct StartArgs {
 
 #[derive(Args, Debug)]
 pub struct TargetArgs {
-    /// Service names (default: every service)
+    /// Service names. Defaults to services with skip-by-default = false
     #[arg(value_name = "SERVICE")]
     pub services: Vec<String>,
+
+    /// Select every service, including those with skip-by-default = true
+    #[arg(long, conflicts_with = "services")]
+    pub all: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct PsArgs {
-    /// Service names (default: every service)
-    #[arg(value_name = "SERVICE")]
-    pub services: Vec<String>,
+    #[command(flatten)]
+    pub targets: TargetArgs,
 
     /// Machine readable output
     #[arg(long)]
@@ -87,9 +89,8 @@ pub struct PsArgs {
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
-    /// Service names (default: every service)
-    #[arg(value_name = "SERVICE")]
-    pub services: Vec<String>,
+    #[command(flatten)]
+    pub targets: TargetArgs,
 
     /// Only the last N lines of each service's combined log
     #[arg(long, value_name = "N")]
@@ -220,7 +221,8 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
                 &project,
                 &loaded.config,
                 start::Request {
-                    services: args.services,
+                    services: args.targets.services,
+                    all: args.targets.all,
                     restart: false,
                     timeout: args.timeout_seconds.map(Duration::from_secs),
                 },
@@ -233,7 +235,8 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
                 &project,
                 &loaded.config,
                 start::Request {
-                    services: args.services,
+                    services: args.targets.services,
+                    all: args.targets.all,
                     restart: true,
                     timeout: args.timeout_seconds.map(Duration::from_secs),
                 },
@@ -242,9 +245,8 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
 
         Command::Stop(args) => {
             let (project, loaded) = open(explicit.as_deref())?;
-            let services = crate::cmd::select_services(&loaded.config, &args.services)
+            let services = crate::cmd::select_services(&loaded.config, &args.services, args.all)
                 .map_err(Failure::config)?;
-            project.ensure_layout().map_err(Failure::from)?;
             stop::run(&project, &loaded.config, services)
         }
 
@@ -254,7 +256,8 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
                 &project,
                 &loaded.config,
                 ps::Request {
-                    services: args.services,
+                    services: args.targets.services,
+                    all: args.targets.all,
                     json: args.json,
                 },
             )
@@ -266,7 +269,8 @@ fn dispatch(cli: Cli) -> Result<i32, Failure> {
                 &project,
                 &loaded.config,
                 logs::Request {
-                    services: args.services,
+                    services: args.targets.services,
+                    all: args.targets.all,
                     tail: args.tail,
                     follow: args.follow,
                 },

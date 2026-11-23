@@ -11,11 +11,11 @@
 于是「反复调用」对人类和 AI 智能体都是安全的。
 
 ```bash
-agproc start              # 并行启动所有 service，等待就绪
+agproc start              # 并行启动默认服务，等待就绪
 agproc ps                 # 谁在跑、pid、运行时长、失败原因
 agproc restart backend    # 改完后端代码后的标准动作
 agproc logs -f            # 带服务名前缀的实时日志
-agproc stop               # 全部停掉
+agproc stop               # 停止默认服务
 ```
 
 ## 为什么需要它
@@ -65,19 +65,20 @@ Skill 的核心纪律：**项目根存在 `agproc.toml` 时，不要直接用 `p
 ## 命令
 
 ```text
-agproc start   [service...] [--timeout-seconds N]   # 未运行则 build + run + 等就绪；已在跑则 no-op
-agproc restart [service...] [--timeout-seconds N]   # 先停，再 build + run + 等就绪
-agproc stop    [service...]                         # 停止运行中的服务，或取消进行中的 build
-agproc ps      [service...] [--json]                # 状态查询
-agproc logs    [service...] [--tail N] [-f]
+agproc start   [service... | --all] [--timeout-seconds N]   # 未运行则 build + run + 等就绪
+agproc restart [service... | --all] [--timeout-seconds N]   # 先停，再 build + run + 等就绪
+agproc stop    [service... | --all]                        # 停止运行中的服务，或取消进行中的 build
+agproc ps      [service... | --all] [--json]                # 状态查询
+agproc logs    [service... | --all] [--tail N] [-f]
 agproc skills  [--json]                             # 输出项目专属的 AI 智能体指引
 agproc init    [--force]                            # 生成模板
 ```
 
-- 省略 `[service...]` 表示**全部** service；支持一次写多个名字。
+- 省略服务名和 `--all` 时，这五个命令会跳过设有 `skip-by-default = true` 的服务。
+  可以显式指定一个或多个服务名，也可以用 `--all` 选择配置中的全部服务。服务名与 `--all` 互斥。
 - `-C/--config <PATH>` 或环境变量 `AGPROC_CONFIG` 指定配置；否则像 git/cargo 一样从当前目录**向上查找** `agproc.toml`，`.agproc/` 建在配置文件同目录。
 - `--timeout-seconds` 只约束**命令等待**：超时打印 `STILL STARTING` 并返回 1，**不会杀掉后台 runner**，可继续用 `ps` / `logs` 观察。
-- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每个服务的合并日志**各取末 N 行；与 `-f` 组合时，先回放这些尾部行，再持续跟随新增输出（`--tail 0 -f` 不回放历史）。不带 `--tail` 时，`-f` 仍完整回放历史。它会在服务停止后**自动返回**，不会挂住 AI 智能体。
+- `agproc logs` 只回放**最后一次 run-cmd** 的 stdout/stderr：没有 agproc 的 marker、没有 build 输出、也没有更早的运行记录。`--tail N` 对**每个服务的合并日志**各取末 N 行；与 `-f` 组合时，先回放这些尾部行，再持续跟随新增输出（`--tail 0 -f` 不回放历史）。不带 `--tail` 时，`-f` 仍完整回放历史。选中的服务全部停止后，`-f` 会**自动返回**。
 
 ## 配置文件 `agproc.toml`
 
@@ -89,6 +90,7 @@ port-check = true                 # 端口预检 + 归属校验
 
 [[service]]
 name = "backend"                  # 必填，唯一，[A-Za-z0-9._-]
+skip-by-default = false           # 可选，设为 true 时默认跳过该服务
 cwd = "."                         # 可选，相对项目根
 env = { RUST_LOG = "debug" }      # 可选，合并进继承的环境
 env-file = ".env"                 # 可选，KEY=VALUE 文件，相对项目根

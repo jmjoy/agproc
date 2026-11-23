@@ -67,6 +67,12 @@ impl Project {
         (output.status.code().unwrap_or(-1), text)
     }
 
+    fn run_ok(&self, args: &[&str]) -> String {
+        let (code, text) = self.combined(args);
+        assert_eq!(code, 0, "agproc {args:?} failed:\n{text}");
+        text
+    }
+
     fn state(&self, service: &str) -> Value {
         let raw = std::fs::read_to_string(self.file(&format!(".agproc/state/{service}.json")))
             .unwrap_or_else(|err| panic!("cannot read state of {service}: {err}"));
@@ -74,15 +80,14 @@ impl Project {
     }
 
     fn ps_json(&self) -> Value {
-        let (code, text) = self.combined(&["ps", "--json"]);
-        assert_eq!(code, 0, "ps --json failed: {text}");
+        let text = self.run_ok(&["ps", "--json"]);
         serde_json::from_str(&text).expect("valid ps json")
     }
 }
 
 impl Drop for Project {
     fn drop(&mut self) {
-        let _ = self.agproc(&["stop"]);
+        let _ = self.agproc(&["stop", "--all"]);
         // Belt and braces: kill anything the state files still point at.
         for entry in std::fs::read_dir(self.file(".agproc/state"))
             .into_iter()
@@ -222,6 +227,81 @@ run-cmd = ["sh", "-c", "echo serving-frontend; sleep 120"]
     let (code, text) = project.combined(&["stop"]);
     assert_eq!(code, 0);
     has(&text, "===== NOT RUNNING =====");
+}
+
+#[test]
+fn lifecycle_commands_respect_service_selection() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "api"
+run-cmd = ["sleep", "120"]
+
+[[service]]
+name = "worker"
+skip-by-default = true
+run-cmd = ["sleep", "120"]
+"#,
+    );
+    let child_pid = |name| {
+        project.state(name)["child-pid"]
+            .as_u64()
+            .expect("running service has a child pid")
+    };
+
+    project.run_ok(&["start"]);
+    let api_pid = child_pid("api");
+    assert!(!project.file(".agproc/state/worker.json").exists());
+
+    project.run_ok(&["start", "worker"]);
+    let worker_pid = child_pid("worker");
+
+    project.run_ok(&["restart"]);
+    assert_ne!(child_pid("api"), api_pid);
+    assert_eq!(child_pid("worker"), worker_pid);
+
+    project.run_ok(&["restart", "worker"]);
+    let restarted_worker_pid = child_pid("worker");
+    assert_ne!(restarted_worker_pid, worker_pid);
+
+    project.run_ok(&["stop"]);
+    assert_eq!(project.state("api")["phase"], "stopped");
+    assert_eq!(project.state("worker")["phase"], "running");
+    assert_eq!(child_pid("worker"), restarted_worker_pid);
+
+    project.run_ok(&["stop", "worker"]);
+    assert_eq!(project.state("worker")["phase"], "stopped");
+
+    project.run_ok(&["start", "--all"]);
+    let api_pid = child_pid("api");
+    let worker_pid = child_pid("worker");
+
+    project.run_ok(&["restart", "--all"]);
+    assert_ne!(child_pid("api"), api_pid);
+    assert_ne!(child_pid("worker"), worker_pid);
+
+    project.run_ok(&["stop", "--all"]);
+    assert_eq!(project.state("api")["phase"], "stopped");
+    assert_eq!(project.state("worker")["phase"], "stopped");
+}
+
+#[test]
+fn no_default_services_yields_an_empty_selection() {
+    let project = Project::new(
+        r#"
+[[service]]
+name = "worker"
+skip-by-default = true
+run-cmd = ["sleep", "120"]
+"#,
+    );
+
+    for command in ["start", "restart", "stop"] {
+        project.run_ok(&[command]);
+    }
+    assert!(!project.file(".agproc").exists());
+    assert_eq!(project.ps_json()["services"], serde_json::json!([]));
+    assert!(project.run_ok(&["logs", "-f"]).is_empty());
 }
 
 #[test]
@@ -782,16 +862,61 @@ run-cmd = ["sh", "-c", "i=0; while true; do echo out-$$-$i; echo err-$$-$i >&2; 
 }
 
 #[test]
-fn logs_all_is_gone() {
+fn ps_and_logs_respect_service_selection() {
     let project = Project::new(
         r#"
 [[service]]
-name = "svc"
+name = "worker"
+skip-by-default = true
+run-cmd = ["sleep", "120"]
+
+[[service]]
+name = "api"
+skip-by-default = false
 run-cmd = ["sleep", "120"]
 "#,
     );
-    let (code, _) = project.combined(&["logs", "--all"]);
-    assert_eq!(code, 2, "--all must be rejected as an unknown flag");
+    std::fs::create_dir_all(project.file(".agproc/logs")).expect("create logs directory");
+    project.write(".agproc/logs/worker.log", "worker-old\nworker-latest\n");
+    project.write(".agproc/logs/api.log", "api-old\napi-latest\n");
+
+    let cases: &[(&[&str], &[&str])] = &[
+        (&[], &["api"]),
+        (&["worker"], &["worker"]),
+        (&["--all"], &["worker", "api"]),
+        (&["api", "worker", "api"], &["api", "worker"]),
+    ];
+    for &(targets, expected) in cases {
+        let mut ps_args = vec!["ps", "--json"];
+        ps_args.extend_from_slice(targets);
+        let report: Value = serde_json::from_str(&project.run_ok(&ps_args)).expect("valid ps json");
+        let names: Vec<_> = report["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .map(|service| service["name"].as_str().expect("service name"))
+            .collect();
+        assert_eq!(names, expected, "ps targets {targets:?}");
+
+        let mut logs_args = vec!["logs", "--tail", "1"];
+        logs_args.extend_from_slice(targets);
+        let logs = project.run_ok(&logs_args);
+        assert_eq!(logs.lines().count(), expected.len(), "{logs}");
+        for (line, name) in logs.lines().zip(expected) {
+            assert!(line.ends_with(&format!("{name}-latest")), "{logs}");
+        }
+    }
+}
+
+#[test]
+fn all_conflicts_with_service_names() {
+    let project = Project::new("[[service]]\nname = \"api\"\nrun-cmd = [\"sleep\", \"120\"]\n");
+    for command in ["start", "restart", "stop", "ps", "logs"] {
+        let (code, text) = project.combined(&[command, "--all", "api"]);
+        assert_eq!(code, 2, "{command} --all api:\n{text}");
+        has(&text, "--all");
+    }
+    assert!(!project.file(".agproc/state/api.json").exists());
 }
 
 #[test]

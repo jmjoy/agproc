@@ -17,6 +17,7 @@ use crate::util::{format_duration_ms, iso8601_local};
 
 pub struct Request {
     pub services: Vec<String>,
+    pub all: bool,
     pub json: bool,
 }
 
@@ -63,7 +64,8 @@ struct Report {
 }
 
 pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, Failure> {
-    let services = select_services(config, &request.services).map_err(Failure::config)?;
+    let services =
+        select_services(config, &request.services, request.all).map_err(Failure::config)?;
     if let Some(warning) = project.layout_warning() {
         Prefix::plain().diagnostic(&format!("WARNING: {warning}"));
     }

@@ -170,13 +170,10 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
 
     out.push('\n');
     out.push_str("Workflow for this project:\n\n");
-    let names: Vec<&str> = loaded
-        .config
-        .services
-        .iter()
-        .map(|service| service.name.as_str())
-        .collect();
-    if names.len() == 1 {
+    let services = &loaded.config.services;
+    if let [service] = services.as_slice()
+        && !service.skip_by_default
+    {
         out.push_str(
             "1. `agproc start` (safe to repeat: it reports `ALREADY RUNNING` instead of restarting).\n\
              2. after editing code: `agproc restart`.\n\
@@ -184,26 +181,32 @@ fn project_section(project: &Project, loaded: &LoadedConfig) -> String {
              4. `agproc stop` when you are done.\n",
         );
     } else {
+        let start = if services.iter().all(|service| service.skip_by_default) {
+            "`agproc start <service>` starts a named service. Use `agproc start --all` to start every service."
+        } else {
+            "`agproc start` starts the default services in parallel and is safe to repeat."
+        };
         out.push_str(&format!(
-            "1. `agproc start` starts all of {} in parallel; it is safe to repeat.\n\
+            "1. {start}\n\
              2. after editing code, restart only what changed: {}.\n\
-             3. if the exit code is not 0: `agproc ps` then `agproc logs <service> --tail 80`.\n\
-             4. `agproc stop` (or `agproc stop <service>`) when you are done.\n",
-            names
+             3. if the exit code is not 0, check `agproc ps <service>` and `agproc logs <service> --tail 80`.\n\
+             4. `agproc stop` stops the default services. Use `agproc stop <service>` to stop one by name.\n",
+            services
                 .iter()
-                .map(|name| format!("`{name}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            names
-                .iter()
-                .map(|name| format!("`agproc restart {name}`"))
+                .map(|service| format!("`agproc restart {}`", service.name))
                 .collect::<Vec<_>>()
                 .join(", "),
         ));
     }
 
     let mut notes = String::new();
-    for service in &loaded.config.services {
+    for service in services {
+        if service.skip_by_default {
+            notes.push_str(&format!(
+                "- `{}` has `skip-by-default = true`. Select it by name or with `--all`.\n",
+                service.name
+            ));
+        }
         if let Some(path) = service.env_file_path(project) {
             notes.push_str(&format!(
                 "- service `{}` loads an env-file `{}` (explicit `env` entries win; `agproc restart` re-reads it)\n",
@@ -255,6 +258,7 @@ probe = { http-get = { port = 3000, path = "/healthz" } }
 
 [[service]]
 name = "frontend"
+skip-by-default = true
 run-cmd = ["pnpm", "preview"]
 probe = { tcp-connect = { port = 5173 } }
 "#,
@@ -268,6 +272,10 @@ probe = { tcp-connect = { port = 5173 } }
             "{section}"
         );
         assert!(section.contains("`agproc restart frontend`"), "{section}");
+        assert!(
+            section.contains("`frontend` has `skip-by-default = true`"),
+            "{section}"
+        );
         assert!(section.contains(".agproc/logs/backend.log"), "{section}");
     }
 

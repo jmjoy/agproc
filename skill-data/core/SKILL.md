@@ -40,21 +40,24 @@ agproc logs backend -f            # returns by itself when the service stops
 agproc stop                       # or: agproc stop backend
 ```
 
-`agproc start` (no service name) starts **every** service in parallel and prefixes each
-line with the service name, padded to the longest one so the `|` columns line up
-(`backend  | ...` next to `frontend | ...`); with a single service there is no prefix.
+`agproc start` starts the selected services in parallel. When several services are selected,
+it prefixes output with their names, padded to align the `|` columns.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `agproc start [service...]` | build (if any) + run + wait for the probe. No-op when already running |
-| `agproc restart [service...]` | stop, then build + run + wait for the probe |
-| `agproc stop [service...]` | stop a running service or cancel a build that is in progress |
-| `agproc ps [service...] [--json]` | what is running, with phase, pid, uptime and reason |
-| `agproc logs [service...] [--tail N] [-f]` | replay or follow the last run-cmd's output |
+| `agproc start [service... \| --all]` | build (if any) + run + wait for the probe. No-op when already running |
+| `agproc restart [service... \| --all]` | stop, then build + run + wait for the probe |
+| `agproc stop [service... \| --all]` | stop a running service or cancel a build that is in progress |
+| `agproc ps [service... \| --all] [--json]` | what is running, with phase, pid, uptime and reason |
+| `agproc logs [service... \| --all] [--tail N] [-f]` | replay or follow the last run-cmd's output |
 | `agproc skills` | this document, specialised for this project |
 | `agproc init [--force]` | write an `agproc.toml` template |
+
+Set `skip-by-default = true` in a `[[service]]` block to skip that service when running
+`start`, `restart`, `stop`, `ps`, or `logs` with no targets. Include it by naming it
+explicitly or use `--all` to select every service. Service names and `--all` are mutually exclusive.
 
 Flags worth knowing:
 
@@ -63,8 +66,8 @@ Flags worth knowing:
   background — check `agproc ps` instead of starting a second one.
 - `agproc logs` replays the **last run-cmd's** output only, with `--tail N` keeping the last N lines
   of each service’s combined log. With `-f`, it replays that tail before following new output; `--tail 0 -f` skips
-  history, while omitting `--tail` still replays the complete history. `-f` returns as soon as the
-  service stops, so it never hangs.
+  history, while omitting `--tail` still replays the complete history. `-f` returns once all
+  selected services stop.
 - Build output is shown live by `start`/`restart` but is not kept in the service logs. After a failed
   build, read it back from `.agproc/tmp/<service>.console.log` (the transient console stream).
 - Each build/run child uses one shared PTY for stdout and stderr. `start`, `restart`, and `logs`

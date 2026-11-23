@@ -65,6 +65,9 @@ fn render(root: &Path) -> String {
          # restart : stop, then build + run + wait for the probe\n\
          # stop/ps/logs: manage and inspect what agproc started\n\
          #\n\
+         # Set skip-by-default = true in a [[service]] block to skip it by default.\n\
+         # Select it by name or use --all to select every service.\n\
+         #\n\
          # build-cmd / run-cmd are argv arrays, executed directly (no shell):\n\
          #   run-cmd = [\"cargo\", \"run\"]           # program + arguments\n\
          #   run-cmd = [\"sh\", \"-c\", \"a | b\"]      # only when you need shell syntax\n\n\

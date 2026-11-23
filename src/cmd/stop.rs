@@ -33,6 +33,11 @@ pub enum StopOutcome {
 
 /// Stop every selected service concurrently.
 pub fn run(project: &Project, config: &Config, services: Vec<&Service>) -> Result<i32, Failure> {
+    if services.is_empty() {
+        return Ok(exit::OK);
+    }
+    project.ensure_layout().map_err(Failure::from)?;
+
     let settings = config.settings.clone();
     let width = prefix_width(services.iter().map(|service| service.name.as_str()));
     let mut results: Vec<(String, Result<StopOutcome, String>)> = Vec::new();

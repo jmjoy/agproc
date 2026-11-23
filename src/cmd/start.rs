@@ -23,6 +23,7 @@ use crate::util::format_duration_ms;
 
 pub struct Request {
     pub services: Vec<String>,
+    pub all: bool,
     pub restart: bool,
     pub timeout: Option<Duration>,
 }
@@ -56,23 +57,23 @@ enum Started {
 }
 
 pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, Failure> {
+    let services =
+        select_services(config, &request.services, request.all).map_err(Failure::config)?;
+    if services.is_empty() {
+        return Ok(exit::OK);
+    }
     if let Some(warning) = project.layout_warning() {
         Prefix::plain().diagnostic(&format!("WARNING: {warning}"));
     }
     project.ensure_layout().map_err(Failure::from)?;
 
-    let services: Vec<Service> = select_services(config, &request.services)
-        .map_err(Failure::config)?
-        .into_iter()
-        .cloned()
-        .collect();
     let settings = config.settings.clone();
     let hash = config_hash(project);
     let width = prefix_width(services.iter().map(|service| service.name.as_str()));
 
     let mut results: Vec<(String, Result<Started, Failed>)> = Vec::new();
     if services.len() == 1 {
-        let service = &services[0];
+        let service = services[0];
         let prefix = Prefix::service(&service.name, width);
         results.push((
             service.name.clone(),
@@ -92,6 +93,7 @@ pub fn run(project: &Project, config: &Config, request: Request) -> Result<i32, 
             let project = project.clone();
             let settings = settings.clone();
             let hash = hash.clone();
+            let service = service.clone();
             let (restart, timeout) = (request.restart, request.timeout);
             handles.push(std::thread::spawn(move || {
                 let prefix = Prefix::service(&service.name, width);

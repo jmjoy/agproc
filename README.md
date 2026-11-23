@@ -11,11 +11,11 @@ agproc takes care of **build → run → probe** and keeps every process's state
 under `.agproc/`, so calling it repeatedly is safe for both humans and AI agents.
 
 ```bash
-agproc start              # start every service in parallel, wait for the probe
+agproc start              # start the default services in parallel, wait for the probe
 agproc ps                 # what is running: pid, uptime, why it failed
 agproc restart backend    # the standard move after editing backend code
 agproc logs -f            # live logs, prefixed per service
-agproc stop               # stop everything
+agproc stop               # stop the default services
 ```
 
 ## Why it exists
@@ -66,16 +66,18 @@ after edits, and on failure read the exit code before reading the logs.
 ## Commands
 
 ```text
-agproc start   [service...] [--timeout-seconds N]   # build + run + wait for the probe; no-op when already running
-agproc restart [service...] [--timeout-seconds N]   # stop first, then build + run + wait for the probe
-agproc stop    [service...]                         # stop a running service or cancel a build in progress
-agproc ps      [service...] [--json]                # what is running
-agproc logs    [service...] [--tail N] [-f]
+agproc start   [service... | --all] [--timeout-seconds N]   # build + run + wait for the probe
+agproc restart [service... | --all] [--timeout-seconds N]   # stop first, then build + run + wait for the probe
+agproc stop    [service... | --all]                        # stop a service or cancel a build in progress
+agproc ps      [service... | --all] [--json]                # what is running
+agproc logs    [service... | --all] [--tail N] [-f]
 agproc skills  [--json]                             # the project-aware guide for agents
 agproc init    [--force]                            # write a config template
 ```
 
-- Omitting `[service...]` means **every** service; several names may be given at once.
+- With no service names or `--all`, these five commands skip services set to `skip-by-default = true`.
+  Give one or more names to select those services explicitly, or use `--all` to select every
+  configured service. Service names and `--all` are mutually exclusive.
 - `-C/--config <PATH>` or `AGPROC_CONFIG` selects the config file. Otherwise agproc searches
   upwards from the current directory for `agproc.toml` (like git and cargo) and creates `.agproc/`
   next to it.
@@ -84,8 +86,7 @@ agproc init    [--force]                            # write a config template
 - `agproc logs` replays the **last run-cmd's** stdout/stderr and nothing else: no agproc markers, no
   build output, no earlier runs. `--tail N` keeps the last N lines of **each service’s combined log**; with `-f`, it
   replays that tail before following new output (`--tail 0 -f` skips history). Without `--tail`, `-f`
-  still replays the complete history. It **returns by itself** once the service stops, so it never
-  hangs an agent.
+  still replays the complete history. It **returns by itself** once all selected services stop.
 
 ## Configuration: `agproc.toml`
 
@@ -97,6 +98,7 @@ port-check = true                 # port preflight + ownership verification
 
 [[service]]
 name = "backend"                  # required, unique, [A-Za-z0-9._-]
+skip-by-default = false           # optional, true opts out of the default selection
 cwd = "."                         # optional, relative to the project root
 env = { RUST_LOG = "debug" }      # optional, merged into the inherited environment
 env-file = ".env"                 # optional, KEY=VALUE pairs, relative to the project root

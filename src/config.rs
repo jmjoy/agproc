@@ -47,6 +47,9 @@ pub struct Config {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Service {
     pub name: String,
+    /// Skip this service in the default command selection.
+    #[serde(default)]
+    pub skip_by_default: bool,
     /// Working directory, relative to the project root (default: the root).
     #[serde(default)]
     pub cwd: Option<String>,

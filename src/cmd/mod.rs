@@ -68,13 +68,18 @@ pub fn marker_text(text: &str) -> String {
     format!("===== {text} =====")
 }
 
-/// Resolve the services named on the command line (empty means "all").
+/// Select named services, or the default set unless all services are requested.
 pub fn select_services<'a>(
     config: &'a Config,
     requested: &[String],
+    all: bool,
 ) -> Result<Vec<&'a Service>, String> {
     if requested.is_empty() {
-        return Ok(config.services.iter().collect());
+        return Ok(config
+            .services
+            .iter()
+            .filter(|service| all || !service.skip_by_default)
+            .collect());
     }
     let mut selected = Vec::new();
     for name in requested {
